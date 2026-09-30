@@ -122,7 +122,7 @@ Google OAuth (login)      Slack OAuth (rate-limit alerts)
 | Mechanism | Implementation |
 |---|---|
 | Worker concurrency | `WORKER_CONCURRENCY` (default 5) — BullMQ workers run jobs in parallel; DB-claim gate keeps it safe |
-| Min delay between sends | `MIN_SEND_DELAY_SECONDS` (default **2s**) — Redis `rl:throttle:global` holds the next-allowed timestamp; enforced inside the atomic claim script |
+| Min delay between sends | `MIN_SEND_DELAY_SECONDS` (default **2s**) — the atomic claim script **reserves the next free send slot** in Redis (`rl:throttle:global`); the worker sleeps until its reserved slot, so N parallel jobs get N distinct slots in arrival order with no re-park churn |
 | Global hourly cap | `MAX_EMAILS_PER_HOUR` (default 200) — Redis counter `rl:hour:<window>:global` |
 | Per-sender hourly cap | `MAX_EMAILS_PER_HOUR_PER_SENDER` (default 0 = off) — Redis counter `rl:hour:<window>:sender:<email>` |
 | Per-batch hourly cap | **"Hourly Limit" field in the Compose UI** (`hourlyLimit` on the schedule API) — Redis counter `rl:hour:<window>:batch:<batchId>`, scoped to that one batch |
@@ -134,24 +134,32 @@ Google OAuth (login)      Slack OAuth (rate-limit alerts)
   so multiple app servers with skewed clocks cannot collectively exceed a cap
   or sneak past the throttle. No in-memory counters anywhere.
 - On a hit, the job is **not dropped or failed**: the DB row returns to
-  `SCHEDULED` and the active job is parked via `job.moveToDelayed()` +
-  `DelayedError` (the sanctioned BullMQ pattern — `changeDelay()` does not work
-  on active jobs). The resume time comes from an **overflow rank queue**
+  `SCHEDULED` with the computed resume time persisted (`nextAttemptAt`, shown
+  in the UI as "old time → new time") and the active job is parked via
+  `job.moveToDelayed()` + `DelayedError`. Parking does **not** consume a
+  delivery attempt. The resume time comes from an **overflow rank queue**
   (`rl:overflow:<window>:<scope>`): rank N drains at next-window-start +
   N × min-delay, spilling into later windows once each window's capacity is
   full — so 1000+ emails drain in arrival order, cap per window.
+- **Verified by an integration harness** (`backend/scripts/integration-harness.ts`,
+  `npm run test:integration --workspace backend` with real Redis + BullMQ):
+  cap windows park exactly the cap and drain in order at the boundary; 1000-email
+  load splits 200/200/200/200 across four windows; sends are spaced ≥ min-delay;
+  failed SMTP attempts release their slot; a post-send DB failure still delivers
+  exactly once; Slack notifies once per window even if connected mid-window.
 - **Slack notification fires live** (webhook or `chat.postMessage`) the first
-  time each scope trips the limit in a window — deduped with a Redis `SET NX`
-  key (`rl:alert:<window>:<scope>`), so the single-alert guarantee holds
-  across multiple worker instances too. No Slack connected → no-op,
-  never a crash; connect later → works without redeploy.
+  time each scope trips the limit in a window. In-app (bell) and Slack
+  notifications dedupe **independently** (`rl:alert:<kind>:<window>:<scope>`,
+  Redis `SET NX`), so connecting Slack mid-window still delivers the very next
+  hit — no redeploy, no waiting an hour. No Slack connected → no-op, never a
+  crash.
 - SMTP failures release their rate-limit slots (`releaseHourlySlots`) and
   retry with backoff; the row is only marked `FAILED` on the final attempt.
 
 ### Behavior under load (1000+ emails at once)
 
-- Scheduling API inserts 1000 rows + enqueues 1000 delayed jobs in one batch
-  (max batch size 10,000, validated).
+- Scheduling API inserts 1000 rows (chunked) + enqueues 1000 delayed jobs via
+  `addBulk` in one batch (max batch size 10,000, validated).
 - Workers pull at most `WORKER_CONCURRENCY` at a time; the 2s throttle gates
   actual SMTP sends to ≤ 1 per 2s; the hourly cap (200/h) pushes the rest
   forward window by window. Nothing is dropped — jobs keep their order and
@@ -193,8 +201,14 @@ Google OAuth (login)      Slack OAuth (rate-limit alerts)
       users/senders/Slack); add `-- --all` to wipe users too, `-- --dry-run`
       to preview
 - [x] Elasticsearch indexing + fuzzy search + graceful degradation
-- [x] Bull Board live queue dashboard (basic-auth)
-- [x] Graceful shutdown (SIGINT/SIGTERM waits for in-flight sends)
+- [x] Bull Board live queue dashboard (basic-auth, timing-safe)
+- [x] Graceful shutdown (SIGINT/SIGTERM closes the worker first — no cut-off sends)
+- [x] Stall recovery: jobs orphaned by a crash/restart are re-enqueued
+      automatically; boot-time reconciler repairs SENDING rows, lost jobs and
+      Redis loss (future emails keep their original target time)
+- [x] Boot-time search resync: emails sent while ES was down are re-indexed
+      from Postgres when ES returns
+- [x] Integration harness: 7 scenarios / 22 checks against real Redis + BullMQ
 
 **Frontend** 
 - [x] Login card: real Google OAuth button + email/password visual form
@@ -234,7 +248,9 @@ Google OAuth (login)      Slack OAuth (rate-limit alerts)
 | POST | `/api/emails/:id/cancel` | Bearer | Cancel a scheduled email |
 | GET | `/api/slack/connect` | Bearer | Slack authorize URL |
 | GET | `/api/slack/status` | Bearer | Slack connection state |
+| POST | `/api/slack/disconnect` | Bearer | Forget stored Slack tokens (re-auth to another workspace) |
 | GET | `/api/stats/rate-limit` | Bearer | Live rate-limit snapshot |
+| GET | `/api/stats/alerts` | Bearer | In-app rate-limit alert feed (bell badge + dropdown + popup) |
 | GET | `/api/stats/worker` | Bearer | Effective worker config |
 | GET | `/api/stats/queue` | Bearer | BullMQ job counts |
 | GET | `/admin/queues` | Basic | Bull Board UI |
@@ -275,7 +291,7 @@ requirement→implementation mapping table.
 3. Watch the **Scheduled** nav; rows flip to **Sent** as workers fire (auto-refresh).
 4. Click a row → detail view; search in **Sent** (ES-backed fuzzy search).
 5. Bull Board shows live waiting/delayed/active/completed jobs.
-6. Restart test: `Ctrl+C` the backend → `npm run dev:backend` → future emails
+6. Restart test: `Ctrl+C` the backend → `npm run dev --workspace backend` → future emails
    still send on time, nothing re-sends.
 7. Rate-limit demo: set `MAX_EMAILS_PER_HOUR=5` (or Hourly Limit = 2 in Compose),
    schedule 20 emails → only the cap sends, Slack pings, the rest resume next hour.
@@ -328,3 +344,12 @@ configuration: [PROJECT_GUIDE.md](PROJECT_GUIDE.md) §7.
    windows is not guaranteed (and isn't in real email systems either).
 8. **CSV parsing is client-side** (fast feedback while composing); the server
    independently re-validates every recipient before scheduling.
+9. **Attachments are stored once per batch** (not copied per recipient) and
+   loaded by the worker at send time — 1000 emails × 5 MB stays 5 MB, not 5 GB.
+10. **Stalls** (process killed mid-send) are treated as infrastructure failures,
+    not delivery failures: BullMQ's stall detector plus the failed-event hook
+    re-enqueue the job, and the DB claim gate keeps delivery at-most-once.
+11. **Throttle wait is in-process**: a job holding a reserved send slot sleeps
+    inside the worker (≤ min-delay), which is why worker locks are sized at
+    60s — much larger than any legitimate wait — so healthy jobs are never
+    mistaken for stalled ones.
