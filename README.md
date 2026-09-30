@@ -6,11 +6,9 @@ A production-grade **email scheduling service + dashboard**: schedule thousands 
 
 **URL:** https://reachinbox-scheduler-kzlr.onrender.com
 
-Hosted on Render's free tier (backend + frontend served from one origin in production mode). Notes:
-- After a period of inactivity the service sleeps; the **first load may take up to ~60s** to wake. Subsequent requests are fast.
-- Scheduled emails queued while asleep fire as soon as the service wakes — nothing is lost.
+Hosted on Railway (backend + frontend served from one origin in production mode). Notes:
 - Login uses **real Google OAuth**, so a live Google client must be configured for this domain.
-- **SMTP on Render:** free-tier instances block outbound SMTP ports, so the live deployment sets `USE_FAKE_SMTP_SINK=true`. Every send still flows through the complete pipeline (claims, throttle waves, hourly caps, status writes, search indexing, Sent tab, Slack alerts) but is accepted by an in-process sink instead of reaching `smtp.ethereal.email` — no real email leaves the host. Locally (no env flag), real Ethereal SMTP delivery is used and preview URLs are produced.
+- Sends go out over **real Ethereal SMTP** with preview URLs — Railway allows outbound SMTP, so the deployed instance behaves exactly like a local run.
 
 Local setup and self-hosting instructions are below.
 

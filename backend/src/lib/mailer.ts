@@ -69,19 +69,6 @@ export async function sendMail(
     attachments?: { filename: string; content: Buffer; contentType?: string }[];
   }
 ): Promise<{ messageId: string; previewUrl: string | null }> {
-  // Deployments on hosts that block outbound SMTP (e.g. Render free tier) can
-  // set USE_FAKE_SMTP_SINK=true: the send "completes" in-process — the full
-  // pipeline (claim, rate limits, status writes, search indexing, Sent tab)
-  // is exercised end-to-end without a network hop, and no real email leaves.
-  if (config.worker.useFakeSmtpSink) {
-    const messageId = `<sink-${Date.now()}-${Math.random().toString(36).slice(2, 10)}@local>`;
-    logger.warn(
-      { from: senderEmail, to: options.to, subject: options.subject, messageId },
-      "FAKE SMTP SINK — message accepted in-process (USE_FAKE_SMTP_SINK=true; no network delivery)"
-    );
-    return { messageId, previewUrl: null };
-  }
-
   const transporter = await getTransportFor(senderEmail);
   const sender = await prisma.emailSender.findUnique({ where: { email: senderEmail } });
   const info = await transporter.sendMail({

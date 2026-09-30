@@ -77,7 +77,6 @@ export const config = {
     maxAttempts: num("MAX_ATTEMPTS", 5),
     backoffMs: num("BACKOFF_MS", 5000),
     jobRetentionMs: num("JOB_RETENTION_MS", 3_600_000),
-    useFakeSmtpSink: bool("USE_FAKE_SMTP_SINK", false),
   },
 } as const;
 
