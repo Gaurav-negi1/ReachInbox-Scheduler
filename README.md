@@ -4,7 +4,7 @@ A production-grade **email scheduling service + dashboard**: schedule thousands 
 
 ## Live demo
 
-**URL:** https://reachinbox-scheduler-kzlr.onrender.com
+**URL:** https://<railway-app>.up.railway.app — live after the first Railway deploy
 
 Hosted on Railway (backend + frontend served from one origin in production mode). Notes:
 - Login uses **real Google OAuth**, so a live Google client must be configured for this domain.
@@ -294,32 +294,36 @@ requirement→implementation mapping table.
 7. Rate-limit demo: set `MAX_EMAILS_PER_HOUR=5` (or Hourly Limit = 2 in Compose),
    schedule 20 emails → only the cap sends, Slack pings, the rest resume next hour.
 
-## Deployment (Render)
+## Deployment (Railway)
 
 The app deploys as **one web service** — in production mode (`NODE_ENV=production`) the
 Express server serves the built React app from `frontend/dist`, so a single URL hosts
 everything and the frontend's relative `/api` calls need no CORS or proxy setup.
 
-1. **Postgres** — Render → New + → Postgres (free tier). Copy the *Internal Database URL*.
-2. **Redis** — Render → New + → Key Value (free tier). Copy the *Internal Redis URL*.
-3. **Web Service** — Render → New + → Web Service → connect the repo:
-   - Build: `npm install --include=dev && npm run build --workspaces && npm run prisma:deploy --workspace backend`
-     (Render builds with `NODE_ENV=production`, which makes npm skip devDependencies —
-     `--include=dev` forces them in: TypeScript, Vite, and `@types/react` are all devDeps
-     and are required *to build*)
-   - Start: `npm run start --workspace backend`
-   - Env vars: `NODE_ENV=production`, `DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`,
-     `BULL_BOARD_USER`/`BULL_BOARD_PASSWORD`, `FRONTEND_URL` + `CORS_ORIGINS` +
-     `GOOGLE_REDIRECT_URI` + `SLACK_REDIRECT_URI` set to the deployed URL, and the
-     Google/Slack OAuth credentials.
-4. **OAuth redirects** — in Google Cloud Console and the Slack app settings, add the
-   deployed callback URLs (`/api/auth/google/callback`, `/api/slack/callback`).
-5. Optional: a cron ping (e.g. cron-job.org hitting `/healthz` every 10 min) keeps the
-   free service awake so the first visitor request is instant.
+[railway.toml](railway.toml) (with Node pinned via `.node-version`) already configures:
+- Build: `npm install --include=dev && npm run build --workspaces && npm run prisma:deploy --workspace backend`
+- Start: `npm run start --workspace backend`
+- Healthcheck: `/healthz`
 
-Elasticsearch is optional in deployment: without it, sent-email search automatically
-degrades to Postgres (responses carry `"degraded": true`). Full details and cloud-ES
-configuration: [PROJECT_GUIDE.md](PROJECT_GUIDE.md) §7.
+1. **Project** — railway.app → New Project → Deploy from GitHub repo (the first build
+   fails until variables exist — expected).
+2. **Add-ons** — on the canvas: Database → **PostgreSQL**, Database → **Redis**, and a
+   community **Elasticsearch** template in the same project.
+3. **Variables** (app service) — `NODE_ENV=production`,
+   `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `REDIS_URL=${{Redis.REDIS_URL}}`,
+   `ELASTICSEARCH_URL=<ES service internal URL>`, `SESSION_SECRET`,
+   `BULL_BOARD_USER`/`BULL_BOARD_PASSWORD`, `FRONTEND_URL` / `CORS_ORIGINS` /
+   `GOOGLE_REDIRECT_URI` / `SLACK_REDIRECT_URI` set to the Railway domain, and the
+   Google/Slack OAuth credentials. (`--include=dev` in the build command matters:
+   production npm installs skip devDependencies, and TypeScript/Vite are needed to
+   build.)
+4. **Domain** — app service → Settings → Networking → Generate Domain (port 4000).
+5. **OAuth redirects** — add `<railway-url>/api/auth/google/callback` in Google Cloud
+   Console and `<railway-url>/api/slack/callback` in the Slack app settings.
+
+Sends go out over **real Ethereal SMTP** (Railway allows outbound port 587). If
+Elasticsearch is not provisioned, sent-email search degrades to Postgres
+(responses carry `"degraded": true`).
 
 ## Assumptions & trade-offs
 
