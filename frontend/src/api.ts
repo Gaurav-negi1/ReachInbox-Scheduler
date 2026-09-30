@@ -1,4 +1,4 @@
-import type { Paginated, ScheduleResponse, ScheduledEmail, SlackStatus, RateLimitSnapshot, WorkerConfig, User, Sender } from "./types";
+import type { Paginated, ScheduleResponse, ScheduledEmail, SlackStatus, RateLimitSnapshot, WorkerConfig, User, Sender, AlertsResponse } from "./types";
 
 const BASE = "/api";
 
@@ -116,6 +116,10 @@ export const api = {
   // ---- slack ----
   slackStatus: () => request<SlackStatus>("/slack/status"),
   slackConnect: () => request<{ url: string }>("/slack/connect"),
+  slackDisconnect: () => request<{ ok: boolean }>("/slack/disconnect", { method: "POST" }),
+
+  // ---- alerts ----
+  alerts: (since = 0) => request<AlertsResponse>(`/stats/alerts?since=${encodeURIComponent(since)}`),
 
   // ---- stats ----
   rateLimit: () => request<RateLimitSnapshot>("/stats/rate-limit"),

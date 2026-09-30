@@ -11,6 +11,31 @@ import { logger } from "../logger";
  * connected we no-op silently — never crash the send path.
  */
 
+/**
+ * Mirror the alert into Postgres so the dashboard bell can show it in-app.
+ * Best-effort: alert persistence must never break the send pipeline.
+ */
+async function recordAlert(
+  userId: string | null,
+  event: RateLimitEvent,
+  slackSent: boolean
+): Promise<void> {
+  try {
+    await prisma.rateLimitAlert.create({
+      data: {
+        userId,
+        reason: event.reason,
+        scope: `${event.reason === "batch" ? "batch" : "sender"} ${event.senderEmail}`,
+        limit: event.limit,
+        queuedAhead: event.queuedAhead,
+        slackSent,
+      },
+    });
+  } catch {
+    // Non-fatal — the Slack message (if any) already went out.
+  }
+}
+
 export type RateLimitEvent = {
   senderEmail: string;
   reason: "global" | "sender" | "batch";
@@ -45,6 +70,7 @@ export async function notifyRateLimitHit(
       const webhook = new IncomingWebhook(user.slackWebhook);
       await webhook.send({ text });
       logger.info({ userId }, "slack webhook notification sent");
+      await recordAlert(userId, event, true);
       return;
     }
 
@@ -55,10 +81,13 @@ export async function notifyRateLimitHit(
         text,
       });
       logger.info({ userId }, "slack bot notification sent");
+      await recordAlert(userId, event, true);
       return;
     }
 
     logger.info({ userId }, "slack not connected — skipping rate-limit notification");
+    await recordAlert(userId, event, false);
+    return;
   } catch (err) {
     // Notification failures must never break the email pipeline.
     logger.error({ err, userId }, "slack notification failed (non-fatal)");

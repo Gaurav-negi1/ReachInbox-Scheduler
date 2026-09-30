@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api";
 import { FilterMenu, type ListFilter } from "./FilterMenu";
+import { AlertBell } from "./AlertBell";
 import type { ScheduledEmail } from "../types";
 
 function timeChip(iso: string | null): string {
@@ -106,6 +107,7 @@ export function EmailList({
           />
         </div>
         <FilterMenu mode={mode} value={filter} onChange={onFilterChange} />
+        <AlertBell />
         <button
           title="Refresh"
           onClick={onRefresh}

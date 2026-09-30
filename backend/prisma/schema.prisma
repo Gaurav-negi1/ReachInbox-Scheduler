@@ -35,6 +35,7 @@ model User {
   updatedAt     DateTime        @updatedAt
   senders       EmailSender[]
   emails        ScheduledEmail[]
+  alerts        RateLimitAlert[]
 }
 
 model EmailSender {
@@ -91,4 +92,20 @@ model Attachment {
   emailId   String?
 
   @@index([batchId])
+}
+
+/// In-app mirror of rate-limit alerts (also delivered to Slack). One row per
+/// scope per hour window — the bell notification feed in the dashboard.
+model RateLimitAlert {
+  id          String   @id @default(uuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id])
+  reason      String   // global | sender | batch
+  scope       String   // human-readable scope, e.g. "sender a@b.c" or "batch xyz"
+  limit       Int
+  queuedAhead Int      // emails parked behind the cap at alert time
+  slackSent   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([userId, createdAt])
 }

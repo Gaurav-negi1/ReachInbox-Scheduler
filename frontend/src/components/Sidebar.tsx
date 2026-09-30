@@ -25,6 +25,7 @@ export function Sidebar({
   const { user, logout } = useAuth();
   const [slack, setSlack] = useState<SlackStatus | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -38,6 +39,18 @@ export function Sidebar({
       window.location.href = url;
     } catch {
       setConnecting(false);
+    }
+  };
+
+  const disconnectSlack = async () => {
+    setDisconnecting(true);
+    try {
+      await api.slackDisconnect();
+      setSlack({ connected: false, teamName: null, channel: null });
+    } catch {
+      // leave the row as-is; the user can retry
+    } finally {
+      setDisconnecting(false);
     }
   };
 
@@ -120,11 +133,21 @@ export function Sidebar({
       {/* Slack + logout */}
       <div className="space-y-2 border-t border-gray-100 pt-3">
         {slack?.connected ? (
-          <div className="flex items-center gap-2 px-1 text-xs text-emerald-600">
-            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M5.042 15.165a2.528 2.528 0 01-2.52 2.523A2.528 2.528 0 010 15.165a2.527 2.527 0 012.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 012.521-2.52 2.527 2.527 0 012.521 2.52v6.313A2.528 2.528 0 018.834 24a2.528 2.528 0 01-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 01-2.521-2.52A2.528 2.528 0 018.834 0a2.528 2.528 0 012.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 012.521 2.521 2.528 2.528 0 01-2.521 2.521H2.522A2.528 2.528 0 010 8.834a2.528 2.528 0 012.522-2.521h6.312z" />
-            </svg>
-            Slack connected{slack.teamName ? ` · ${slack.teamName}` : ""}
+          <div className="group/slack flex items-center justify-between gap-2 px-1 py-1.5 text-xs text-emerald-600">
+            <span className="flex min-w-0 items-center gap-2">
+              <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M5.042 15.165a2.528 2.528 0 01-2.52 2.523A2.528 2.528 0 010 15.165a2.527 2.527 0 012.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 012.521-2.52 2.527 2.527 0 012.521 2.52v6.313A2.528 2.528 0 018.834 24a2.528 2.528 0 01-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 01-2.521-2.52A2.528 2.528 0 018.834 0a2.528 2.528 0 012.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 012.521 2.521 2.528 2.528 0 01-2.521 2.521H2.522A2.528 2.528 0 010 8.834a2.528 2.528 0 012.522-2.521h6.312z" />
+              </svg>
+              <span className="truncate">Slack connected{slack.teamName ? ` · ${slack.teamName}` : ""}</span>
+            </span>
+            <button
+              onClick={disconnectSlack}
+              disabled={disconnecting}
+              title="Disconnect to choose a different Slack workspace"
+              className="shrink-0 text-[11px] text-gray-400 opacity-0 transition group-hover/slack:opacity-100 hover:text-red-500 disabled:opacity-60"
+            >
+              {disconnecting ? "Removing…" : "Disconnect"}
+            </button>
           </div>
         ) : (
           <button

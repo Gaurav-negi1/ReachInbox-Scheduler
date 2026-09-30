@@ -72,3 +72,18 @@ export interface Sender {
   email: string;
   name: string | null;
 }
+
+export interface RateLimitAlert {
+  id: string;
+  reason: "global" | "sender" | "batch";
+  scope: string;
+  limit: number;
+  queuedAhead: number;
+  slackSent: boolean;
+  createdAt: string;
+}
+
+export interface AlertsResponse {
+  unread: number;
+  items: RateLimitAlert[];
+}
