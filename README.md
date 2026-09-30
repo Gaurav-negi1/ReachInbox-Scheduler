@@ -2,6 +2,17 @@
 
 A production-grade **email scheduling service + dashboard**: schedule thousands of emails for future delivery, backed by **BullMQ + Redis** delayed jobs (no cron), persisted in **PostgreSQL**, sent over **Ethereal fake SMTP** from multiple senders, searchable in **Elasticsearch**, with real **Google OAuth** login and **Slack alerts** the moment an hourly limit is hit.
 
+## Live demo
+
+**URL:** https://reachinbox-scheduler.onrender.com  <!-- update with the actual Render URL after deploy -->
+
+Hosted on Render's free tier (backend + frontend served from one origin in production mode). Notes:
+- After a period of inactivity the service sleeps; the **first load may take up to ~60s** to wake. Subsequent requests are fast.
+- Scheduled emails queued while asleep fire as soon as the service wakes — nothing is lost.
+- Login uses **real Google OAuth**, so a live Google client must be configured for this domain.
+
+Local setup and self-hosting instructions are below.
+
 ## Stack
 
 | Layer | Tech |
@@ -258,6 +269,30 @@ requirement→implementation mapping table.
    still send on time, nothing re-sends.
 7. Rate-limit demo: set `MAX_EMAILS_PER_HOUR=5` (or Hourly Limit = 2 in Compose),
    schedule 20 emails → only the cap sends, Slack pings, the rest resume next hour.
+
+## Deployment (Render)
+
+The app deploys as **one web service** — in production mode (`NODE_ENV=production`) the
+Express server serves the built React app from `frontend/dist`, so a single URL hosts
+everything and the frontend's relative `/api` calls need no CORS or proxy setup.
+
+1. **Postgres** — Render → New + → Postgres (free tier). Copy the *Internal Database URL*.
+2. **Redis** — Render → New + → Key Value (free tier). Copy the *Internal Redis URL*.
+3. **Web Service** — Render → New + → Web Service → connect the repo:
+   - Build: `npm install && npm run build --workspaces && npm run prisma:deploy --workspace backend`
+   - Start: `npm run start --workspace backend`
+   - Env vars: `NODE_ENV=production`, `DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`,
+     `BULL_BOARD_USER`/`BULL_BOARD_PASSWORD`, `FRONTEND_URL` + `CORS_ORIGINS` +
+     `GOOGLE_REDIRECT_URI` + `SLACK_REDIRECT_URI` set to the deployed URL, and the
+     Google/Slack OAuth credentials.
+4. **OAuth redirects** — in Google Cloud Console and the Slack app settings, add the
+   deployed callback URLs (`/api/auth/google/callback`, `/api/slack/callback`).
+5. Optional: a cron ping (e.g. cron-job.org hitting `/healthz` every 10 min) keeps the
+   free service awake so the first visitor request is instant.
+
+Elasticsearch is optional in deployment: without it, sent-email search automatically
+degrades to Postgres (responses carry `"degraded": true`). Full details and cloud-ES
+configuration: [PROJECT_GUIDE.md](PROJECT_GUIDE.md) §7.
 
 ## Assumptions & trade-offs
 
