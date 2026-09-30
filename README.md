@@ -4,7 +4,7 @@ A production-grade **email scheduling service + dashboard**: schedule thousands 
 
 ## Live demo
 
-**URL:** https://reachinbox-scheduler.onrender.com  <!-- update with the actual Render URL after deploy -->
+**URL:** https://reachinbox-scheduler-kzlr.onrender.com
 
 Hosted on Render's free tier (backend + frontend served from one origin in production mode). Notes:
 - After a period of inactivity the service sleeps; the **first load may take up to ~60s** to wake. Subsequent requests are fast.
