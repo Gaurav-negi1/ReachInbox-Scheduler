@@ -168,7 +168,10 @@ Google OAuth (login)      Slack OAuth (rate-limit alerts)
   recipient/subject/body/sender, scoped to the user and to `SENT`/`FAILED`
   statuses. The scheduled tab stays Postgres-backed (fast, authoritative).
 - If ES is down, the API **degrades gracefully to Postgres** (flagged in the
-  response as `degraded: true`) instead of erroring.
+  response as `degraded: true`) instead of erroring. A 30s circuit breaker
+  short-circuits all ES calls while ES is unreachable, so the fallback answers
+  instantly instead of waiting on network timeouts — search resumes
+  automatically once ES is reachable again.
 
 
 **Backend**
@@ -183,6 +186,12 @@ Google OAuth (login)      Slack OAuth (rate-limit alerts)
 - [x] Star (persisted + ES-synced) and All/Starred/Failed filters on both lists
 - [x] Rich-text HTML body (sent as HTML with plain-text fallback; DOMPurify-sanitized on display)
 - [x] Slack alerts on limit hit (OAuth, live webhooks, disconnect-safe)
+- [x] In-app alert feed: bell + unread badge, dropdown history, and a popup
+      toast when a rate-limit alert fires; wiped by `reset-data`
+- [x] Demo reset: `npm run reset-data --workspace backend` clears emails,
+      attachments, alerts, BullMQ jobs and Redis rate-limit windows (keeps
+      users/senders/Slack); add `-- --all` to wipe users too, `-- --dry-run`
+      to preview
 - [x] Elasticsearch indexing + fuzzy search + graceful degradation
 - [x] Bull Board live queue dashboard (basic-auth)
 - [x] Graceful shutdown (SIGINT/SIGTERM waits for in-flight sends)
