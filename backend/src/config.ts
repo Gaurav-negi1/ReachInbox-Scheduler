@@ -32,6 +32,14 @@ export const config = {
   elasticsearchUrl: str("ELASTICSEARCH_URL", "http://localhost:9200"),
   elasticsearchApiKey: str("ELASTICSEARCH_API_KEY", ""),
 
+  // SMTP transport (defaults to Ethereal; override for hosts that block
+  // outbound port 587, e.g. free PaaS tiers — use a relay on port 2525).
+  smtp: {
+    host: str("SMTP_HOST", "smtp.ethereal.email"),
+    port: num("SMTP_PORT", 587),
+    secure: bool("SMTP_SECURE", false),
+  },
+
   bullBoardUser: str("BULL_BOARD_USER", "admin"),
   bullBoardPassword: str("BULL_BOARD_PASSWORD", "admin123"),
 

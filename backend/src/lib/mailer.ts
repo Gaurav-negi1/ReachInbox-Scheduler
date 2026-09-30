@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import type { Transporter } from "nodemailer";
+import { config } from "../config";
 import { prisma } from "./prisma";
 import { logger } from "../logger";
 
@@ -26,11 +27,13 @@ export async function createEtherealAccount(
 }
 
 export function buildTransport(user: string, pass: string): Transporter {
-  // Ethereal: host smtp.ethereal.email, port 587, STARTTLS.
+  // Defaults to Ethereal (smtp.ethereal.email:587, STARTTLS). Host/port/secure
+  // are env-configurable (SMTP_HOST/SMTP_PORT/SMTP_SECURE) so deployments on
+  // hosts that block outbound SMTP:587 can point at a relay on another port.
   return nodemailer.createTransport({
-    host: "smtp.ethereal.email",
-    port: 587,
-    secure: false,
+    host: config.smtp.host,
+    port: config.smtp.port,
+    secure: config.smtp.secure,
     auth: { user, pass },
     pool: true,
     maxConnections: 3,
