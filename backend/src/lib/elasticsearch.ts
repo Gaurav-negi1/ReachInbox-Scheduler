@@ -27,15 +27,24 @@ const EMAILS_MAPPING: MappingTypeMapping = {
   },
 };
 
+/**
+ * Ensure the emails index exists. Never throws: search is a best-effort layer
+ * on top of Postgres (source of truth), so an unreachable ES must not break
+ * scheduling or sending. Callers (schedule flow, boot) rely on this guarantee.
+ */
 export async function ensureEmailsIndex(): Promise<void> {
-  const exists = await esClient.indices.exists({ index: EMAILS_INDEX });
-  if (!exists) {
-    await esClient.indices.create({
-      index: EMAILS_INDEX,
-      settings: { number_of_shards: 1, number_of_replicas: 0 },
-      mappings: EMAILS_MAPPING,
-    });
-    logger.info({ index: EMAILS_INDEX }, "elasticsearch index created");
+  try {
+    const exists = await esClient.indices.exists({ index: EMAILS_INDEX });
+    if (!exists) {
+      await esClient.indices.create({
+        index: EMAILS_INDEX,
+        settings: { number_of_shards: 1, number_of_replicas: 0 },
+        mappings: EMAILS_MAPPING,
+      });
+      logger.info({ index: EMAILS_INDEX }, "elasticsearch index created");
+    }
+  } catch (err) {
+    logger.warn({ err: (err as Error).message }, "elasticsearch unavailable — search will fall back to Postgres");
   }
 }
 
