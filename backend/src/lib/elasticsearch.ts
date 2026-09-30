@@ -35,7 +35,11 @@ function tripBreaker(err: unknown): void {
 
 export const esClient = new Client({
   node: config.elasticsearchUrl,
-  ...(config.elasticsearchApiKey ? { auth: { apiKey: config.elasticsearchApiKey } } : {}),
+  ...(config.elasticsearchApiKey
+    ? { auth: { apiKey: config.elasticsearchApiKey } }
+    : config.elasticsearchUsername && config.elasticsearchPassword
+      ? { auth: { username: config.elasticsearchUsername, password: config.elasticsearchPassword } }
+      : {}),
   // Fail fast: search is best-effort, so a dead ES must not hold HTTP requests
   // for the client's default 30s timeout × 3 retries.
   requestTimeout: 3_000,

@@ -39,6 +39,10 @@ export const config = {
   redisUrl: str("REDIS_URL", "redis://localhost:6379"),
   elasticsearchUrl: str("ELASTICSEARCH_URL", "http://localhost:9200"),
   elasticsearchApiKey: str("ELASTICSEARCH_API_KEY", ""),
+  // Basic auth for clusters that require it (e.g. Railway's Elasticsearch
+  // template ships with security enabled: user "elastic" + generated password).
+  elasticsearchUsername: str("ELASTICSEARCH_USERNAME", ""),
+  elasticsearchPassword: str("ELASTICSEARCH_PASSWORD", ""),
 
   // SMTP transport (defaults to Ethereal; override for hosts that block
   // outbound port 587, e.g. free PaaS tiers — use a relay on port 2525).
