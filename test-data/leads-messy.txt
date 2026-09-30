@@ -1,0 +1,7 @@
+john.smith@example.com, JANE_DOE@Example.COM
+not-an-email
+  sam.lee@example.com   
+john.smith@example.com
+kelly.rai@example.com; omar.khan@example.com
+@@bad@@
+maria.chen@example.com

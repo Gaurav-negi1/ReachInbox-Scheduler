@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EmailStatus {
+  SCHEDULED
+  SENDING
+  SENT
+  FAILED
+  CANCELLED
+}
+
+enum JobSource {
+  API
+  CSV
+}
+
+model User {
+  id            String          @id @default(uuid())
+  googleId      String          @unique
+  email         String          @unique
+  name          String
+  avatarUrl     String?
+  slackTeamName String?
+  slackTeamId   String?
+  slackWebhook  String?
+  slackBotToken String?
+  slackChannel  String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  senders       EmailSender[]
+  emails        ScheduledEmail[]
+}
+
+model EmailSender {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  email     String   @unique
+  name      String?
+  active    Boolean  @default(true)
+  smtpUser  String?
+  smtpPass  String?
+  createdAt DateTime @default(now())
+}
+
+model ScheduledEmail {
+  id             String      @id @default(uuid())
+  userId         String?
+  user           User?       @relation(fields: [userId], references: [id])
+  senderEmail    String
+  recipientEmail String
+  subject        String
+  body           String
+  status         EmailStatus @default(SCHEDULED)
+  scheduledAt    DateTime
+  sentAt         DateTime?
+  bullJobId      String?     @unique
+  attemptCount   Int         @default(0)
+  lastError      String?
+  source         JobSource   @default(API)
+  hourlyLimit    Int?        // optional per-batch hourly cap set at compose time
+  starred        Boolean     @default(false)
+  bodyHtml       String?     // rich-text HTML body (sanitized again on display)
+  batchId        String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  attachments    Attachment[]
+
+  @@unique([senderEmail, recipientEmail, subject, scheduledAt])
+  @@index([status, scheduledAt])
+  @@index([batchId])
+  @@index([userId, status])
+}
+
+/// Attachments belong to a batch (one upload shared by every email in the batch).
+model Attachment {
+  id        String   @id @default(uuid())
+  batchId   String
+  filename  String
+  mimetype  String
+  size      Int
+  data      Bytes
+  createdAt DateTime @default(now())
+  email     ScheduledEmail? @relation(fields: [emailId], references: [id], onDelete: Cascade)
+  emailId   String?
+
+  @@index([batchId])
+}
