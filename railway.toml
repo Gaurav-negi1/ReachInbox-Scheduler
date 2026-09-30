@@ -1,0 +1,12 @@
+[build]
+builder = "NIXPACKS"
+# NODE_ENV=production makes npm skip devDependencies, which the TypeScript
+# build needs — same fix as the Render deploy.
+buildCommand = "npm install --include=dev && npm run build --workspaces && npm run prisma:deploy --workspace backend"
+
+[deploy]
+startCommand = "npm run start --workspace backend"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
