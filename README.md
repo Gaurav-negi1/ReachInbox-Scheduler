@@ -279,7 +279,10 @@ everything and the frontend's relative `/api` calls need no CORS or proxy setup.
 1. **Postgres** — Render → New + → Postgres (free tier). Copy the *Internal Database URL*.
 2. **Redis** — Render → New + → Key Value (free tier). Copy the *Internal Redis URL*.
 3. **Web Service** — Render → New + → Web Service → connect the repo:
-   - Build: `npm install && npm run build --workspaces && npm run prisma:deploy --workspace backend`
+   - Build: `npm install --include=dev && npm run build --workspaces && npm run prisma:deploy --workspace backend`
+     (Render builds with `NODE_ENV=production`, which makes npm skip devDependencies —
+     `--include=dev` forces them in: TypeScript, Vite, and `@types/react` are all devDeps
+     and are required *to build*)
    - Start: `npm run start --workspace backend`
    - Env vars: `NODE_ENV=production`, `DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`,
      `BULL_BOARD_USER`/`BULL_BOARD_PASSWORD`, `FRONTEND_URL` + `CORS_ORIGINS` +
