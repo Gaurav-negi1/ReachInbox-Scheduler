@@ -10,6 +10,7 @@ Hosted on Render's free tier (backend + frontend served from one origin in produ
 - After a period of inactivity the service sleeps; the **first load may take up to ~60s** to wake. Subsequent requests are fast.
 - Scheduled emails queued while asleep fire as soon as the service wakes — nothing is lost.
 - Login uses **real Google OAuth**, so a live Google client must be configured for this domain.
+- **SMTP on Render:** free-tier instances block outbound SMTP ports, so the live deployment sets `USE_FAKE_SMTP_SINK=true`. Every send still flows through the complete pipeline (claims, throttle waves, hourly caps, status writes, search indexing, Sent tab, Slack alerts) but is accepted by an in-process sink instead of reaching `smtp.ethereal.email` — no real email leaves the host. Locally (no env flag), real Ethereal SMTP delivery is used and preview URLs are produced.
 
 Local setup and self-hosting instructions are below.
 

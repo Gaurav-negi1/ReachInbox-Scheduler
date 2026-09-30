@@ -63,17 +63,37 @@ export type EmailDoc = {
   lastError?: string | null;
 };
 
+/**
+ * Mirror an email document into Elasticsearch. Best-effort by contract: ES is
+ * a derived search layer over Postgres (source of truth), so an indexing
+ * failure must never propagate into the caller's transaction. Callers that
+ * want explicit handling can still catch; a warn-level log is recorded here.
+ */
 export async function indexEmail(doc: EmailDoc): Promise<void> {
-  await esClient.index({
-    index: EMAILS_INDEX,
-    id: doc.id,
-    document: { ...doc, lastError: doc.lastError ?? null },
-    refresh: false,
-  });
+  try {
+    await esClient.index({
+      index: EMAILS_INDEX,
+      id: doc.id,
+      document: { ...doc, lastError: doc.lastError ?? null },
+      refresh: false,
+    });
+  } catch (err) {
+    logger.warn(
+      { emailId: doc.id, err: (err as Error).message },
+      "elasticsearch index failed (search may be stale) — non-fatal"
+    );
+  }
 }
 
 export async function deleteEmailDoc(id: string): Promise<void> {
-  await esClient.delete({ index: EMAILS_INDEX, id }, { ignore: [404] });
+  try {
+    await esClient.delete({ index: EMAILS_INDEX, id }, { ignore: [404] });
+  } catch (err) {
+    logger.warn(
+      { emailId: id, err: (err as Error).message },
+      "elasticsearch delete failed — non-fatal"
+    );
+  }
 }
 
 export type SearchParams = {

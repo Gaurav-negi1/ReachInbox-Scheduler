@@ -116,6 +116,9 @@ async function processEmailJob(job: Job, token?: string): Promise<void> {
       data: { status: "SENT", sentAt, lastError: null },
     });
 
+    // Mirror into Elasticsearch only after the DB commit. indexEmail is
+    // best-effort (never throws), and the guard below is belt-and-braces so a
+    // search-layer outage can never turn a completed send into a "failure".
     await indexEmail({
       id: row.id,
       userId: row.userId,
@@ -128,7 +131,7 @@ async function processEmailJob(job: Job, token?: string): Promise<void> {
       sentAt,
       batchId: row.batchId,
       starred: row.starred,
-    });
+    }).catch(() => undefined);
 
     logger.info(
       { jobId: job.id, to: recipientEmail, messageId, previewUrl, attachments: attachmentRows.length },
