@@ -1,11 +1,12 @@
-import { Router } from "express";
+import { safeRouter } from "../lib/safeRouter";
 import axios from "axios";
+import jwt from "jsonwebtoken";
 import { prisma } from "../lib/prisma";
 import { config } from "../config";
 import { requireAuth, signStateToken } from "../middleware/auth";
 import { logger } from "../logger";
 
-const router = Router();
+const router = safeRouter();
 
 /**
  * Slack "Connect" flow:
@@ -18,6 +19,9 @@ const router = Router();
  *  4. Status endpoint tells the dashboard whether Slack is connected.
  */
 router.get("/connect", requireAuth, (req, res) => {
+  if (!config.slack.clientId || !config.slack.clientSecret) {
+    return res.status(503).json({ error: "Slack integration is not configured (SLACK_CLIENT_ID / SLACK_CLIENT_SECRET)" });
+  }
   const state = signStateToken({ userId: req.user!.id, nonce: Math.random().toString(36).slice(2) });
   res.cookie("slack_oauth_state", state, {
     httpOnly: true,
@@ -44,13 +48,25 @@ router.get("/callback", async (req, res) => {
     return res.redirect(`${frontend}/settings?slack=state_mismatch`);
   }
 
+  // The state is a JWT we signed in /connect. Verify the signature (and expiry)
+  // instead of just base64-decoding it: decoding alone would let a forged
+  // cookie+state pair bind an attacker's Slack workspace to ANY user id.
+  let stateUserId: string;
+  try {
+    const decoded = jwt.verify(state, config.sessionSecret) as { userId?: string };
+    if (!decoded.userId) throw new Error("no userId in state");
+    stateUserId = decoded.userId;
+  } catch {
+    return res.redirect(`${frontend}/settings?slack=state_invalid`);
+  }
+
   try {
     const tokenResp = await axios.post(
       "https://slack.com/api/oauth.v2.access",
       new URLSearchParams({
         client_id: config.slack.clientId,
         client_secret: config.slack.clientSecret,
-        code: code!,
+        code,
         redirect_uri: config.slack.redirectUri,
       }),
       { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
@@ -67,7 +83,7 @@ router.get("/callback", async (req, res) => {
       return res.redirect(`${frontend}/settings?slack=${encodeURIComponent(data.error ?? "failed")}`);
     }
 
-    let channel = data.incoming_webhook?.channel ?? null;
+    const channel = data.incoming_webhook?.channel ?? null;
     const botToken = data.access_token;
     try {
       const authTest = await axios.post(
@@ -81,9 +97,9 @@ router.get("/callback", async (req, res) => {
       // non-fatal
     }
 
-    const userId = JSON.parse(Buffer.from(state.split(".")[1], "base64").toString()) as { userId?: string };
+    res.clearCookie("slack_oauth_state");
     await prisma.user.update({
-      where: { id: userId.userId! },
+      where: { id: stateUserId },
       data: {
         slackBotToken: botToken,
         slackWebhook: data.incoming_webhook?.url ?? null,

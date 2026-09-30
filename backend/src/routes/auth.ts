@@ -1,13 +1,13 @@
-import { Router, type Request, type Response } from "express";
+import { safeRouter } from "../lib/safeRouter";
+import type { Request, Response } from "express";
 import crypto from "crypto";
 import { OAuth2Client } from "google-auth-library";
-import jwt from "jsonwebtoken";
 import { prisma } from "../lib/prisma";
 import { config, SESSION_COOKIE } from "../config";
 import { logger } from "../logger";
 import { requireAuth, signAppToken, signStateToken, toAuthUser } from "../middleware/auth";
 
-const router = Router();
+const router = safeRouter();
 
 function oauthClient(): OAuth2Client {
   return new OAuth2Client(
@@ -41,7 +41,11 @@ router.get("/google/url", (req: Request, res: Response) => {
 });
 
 router.get("/google/callback", async (req: Request, res: Response) => {
-  const frontend = (req.query.origin as string) || config.frontendUrl;
+  // `origin` lets a deployment pick which frontend to land on, but it must be
+  // one of our configured origins — otherwise this is an open redirect that
+  // would hand the freshly minted session token to an attacker's site.
+  const requested = typeof req.query.origin === "string" ? req.query.origin.replace(/\/+$/, "") : "";
+  const frontend = requested && config.corsOrigins.includes(requested) ? requested : config.frontendUrl;
   try {
     const code = req.query.code as string | undefined;
     const state = req.query.state as string | undefined;

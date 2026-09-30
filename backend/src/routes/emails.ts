@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { safeRouter } from "../lib/safeRouter";
 import multer from "multer";
 import { prisma } from "../lib/prisma";
 import { toDTO, ScheduleService } from "../services/scheduleService";
@@ -7,7 +7,7 @@ import { logger } from "../logger";
 import type { EmailDoc } from "../lib/elasticsearch";
 import { esAvailable } from "../lib/elasticsearch";
 
-const router = Router();
+const router = safeRouter();
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -123,23 +123,37 @@ function parseFilter(v: unknown): "all" | "starred" | "failed" {
   return v === "starred" || v === "failed" ? v : "all";
 }
 
-/** Batch-shared attachment summaries for a set of emails (batchId -> files). */
+/**
+ * Attachment summaries for a set of emails. Attachments are stored once per
+ * batch (emailId = null); older rows may instead carry a per-email copy.
+ */
 async function attachmentSummaries(
   rows: { id: string; batchId: string | null }[]
 ): Promise<Map<string, AttachmentSummary[]>> {
   const byEmail = new Map<string, AttachmentSummary[]>();
+  if (!rows.length) return byEmail;
   const batchIds = [...new Set(rows.map((r) => r.batchId).filter((b): b is string => !!b))];
-  if (!batchIds.length) return byEmail;
   const atts = await prisma.attachment.findMany({
-    where: { batchId: { in: batchIds }, emailId: { not: null } },
-    select: { id: true, emailId: true, filename: true, mimetype: true, size: true },
-    distinct: ["emailId", "filename"],
+    where: {
+      OR: [
+        { emailId: { in: rows.map((r) => r.id) } },
+        ...(batchIds.length ? [{ batchId: { in: batchIds }, emailId: null }] : []),
+      ],
+    },
+    select: { id: true, emailId: true, batchId: true, filename: true, mimetype: true, size: true },
   });
+
+  const byBatch = new Map<string, AttachmentSummary[]>();
+  const byOwnEmail = new Map<string, AttachmentSummary[]>();
   for (const a of atts) {
-    if (!a.emailId) continue;
-    const list = byEmail.get(a.emailId) ?? [];
-    list.push({ id: a.id, filename: a.filename, mimetype: a.mimetype, size: a.size });
-    byEmail.set(a.emailId, list);
+    const summary = { id: a.id, filename: a.filename, mimetype: a.mimetype, size: a.size };
+    const target = a.emailId ? byOwnEmail : byBatch;
+    const key = a.emailId ?? a.batchId;
+    target.set(key, [...(target.get(key) ?? []), summary]);
+  }
+  for (const r of rows) {
+    const list = byOwnEmail.get(r.id) ?? (r.batchId ? byBatch.get(r.batchId) : undefined);
+    if (list?.length) byEmail.set(r.id, list);
   }
   return byEmail;
 }
@@ -153,7 +167,12 @@ router.get("/scheduled", requireAuth, async (req, res) => {
   const filter = parseFilter(req.query.filter);
 
   const where = {
-    status: filter === "failed" ? ("FAILED" as const) : ("SCHEDULED" as const),
+    // SENDING rows are in flight (claimed, waiting for a throttle slot or on the
+    // wire); keep them visible instead of vanishing from both tabs.
+    status:
+      filter === "failed"
+        ? { in: ["FAILED" as const] }
+        : { in: ["SCHEDULED" as const, "SENDING" as const] },
     ...(filter === "starred" ? { starred: true } : {}),
     OR: [{ userId: null }, { userId }],
     ...(search
@@ -238,7 +257,7 @@ router.get("/sent", requireAuth, async (req, res) => {
       prisma.scheduledEmail.count({ where }),
       prisma.scheduledEmail.findMany({
         where,
-        orderBy: { sentAt: "desc" },
+        orderBy: { scheduledAt: "desc" },
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -267,13 +286,11 @@ router.get("/senders", requireAuth, async (req, res) => {
 
 /** GET /api/emails/:id — single email detail (scheduled or sent). */
 router.get("/:id", requireAuth, async (req, res) => {
-  const row = await prisma.scheduledEmail.findUnique({
-    where: { id: req.params.id },
-    include: { attachments: { select: { id: true, filename: true, mimetype: true, size: true } } },
-  });
+  const row = await prisma.scheduledEmail.findUnique({ where: { id: req.params.id } });
   if (!row) return res.status(404).json({ error: "not found" });
   if (row.userId && row.userId !== req.user!.id) return res.status(403).json({ error: "forbidden" });
-  res.json({ ...toDTO(row), attachments: row.attachments });
+  const atts = await attachmentSummaries([row]);
+  res.json({ ...toDTO(row), attachments: atts.get(row.id) ?? [] });
 });
 
 /** PATCH /api/emails/:id/star — toggle the star flag. */
@@ -315,10 +332,12 @@ router.get("/:id/attachments/:attachmentId", requireAuth, async (req, res) => {
   if (email.userId && email.userId !== req.user!.id) return res.status(403).json({ error: "forbidden" });
 
   const att = await prisma.attachment.findUnique({ where: { id: req.params.attachmentId } });
-  if (!att || att.emailId !== email.id) return res.status(404).json({ error: "attachment not found" });
+  const belongs =
+    !!att && (att.emailId === email.id || (att.emailId === null && !!email.batchId && att.batchId === email.batchId));
+  if (!att || !belongs) return res.status(404).json({ error: "attachment not found" });
 
   res.setHeader("Content-Type", att.mimetype || "application/octet-stream");
-  res.setHeader("Content-Disposition", `attachment; filename="${att.filename.replace(/"/g, "")}"`);
+  res.setHeader("Content-Disposition", `attachment; filename="${att.filename.replace(/[\r\n"\\]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(att.filename)}`);
   res.setHeader("Content-Length", String(att.size));
   res.end(Buffer.from(att.data));
 });

@@ -4,6 +4,7 @@ import session from "express-session";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import path from "path";
+import { timingSafeEqual } from "crypto";
 import fs from "fs";
 import { createBullBoard } from "@bull-board/api";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
@@ -16,6 +17,12 @@ import slackRoutes from "./routes/slack";
 import statsRoutes from "./routes/stats";
 import { logger } from "./logger";
 
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
 function basicAuth(
   user: string,
   pass: string
@@ -25,8 +32,12 @@ function basicAuth(
     if (header) {
       const [scheme, encoded] = header.split(" ");
       if (scheme === "Basic" && encoded) {
-        const [u, p] = Buffer.from(encoded, "base64").toString().split(":");
-        if (u === user && p === pass) return next();
+        const decoded = Buffer.from(encoded, "base64").toString();
+        // Split on the FIRST colon only — passwords may legitimately contain ':'.
+        const i = decoded.indexOf(":");
+        const u = i >= 0 ? decoded.slice(0, i) : decoded;
+        const p = i >= 0 ? decoded.slice(i + 1) : "";
+        if (safeEqual(u, user) && safeEqual(p, pass)) return next();
       }
     }
     res.setHeader("WWW-Authenticate", 'Basic realm="bull-board", charset="UTF-8"');

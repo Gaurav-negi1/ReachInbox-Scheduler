@@ -1,6 +1,7 @@
 import { prisma } from "./prisma";
 import { emailQueue } from "./queue";
 import { logger } from "../logger";
+import { config } from "../config";
 import type { EmailJobData } from "./types";
 import { indexEmail } from "./elasticsearch";
 import type { ScheduledEmail } from "@prisma/client";
@@ -19,6 +20,7 @@ async function syncDoc(row: ScheduledEmail, status: "SENT" | "FAILED", lastError
       scheduledAt: row.scheduledAt,
       sentAt: status === "SENT" ? new Date() : null,
       batchId: row.batchId,
+      starred: row.starred,
       lastError: lastError ?? null,
     });
   } catch {
@@ -26,17 +28,32 @@ async function syncDoc(row: ScheduledEmail, status: "SENT" | "FAILED", lastError
   }
 }
 
+const PAGE = 500;
+const CONCURRENCY = 25;
+
+/** Run `fn` over items with bounded parallelism. */
+async function forEachLimited<T>(items: T[], fn: (item: T) => Promise<void>): Promise<void> {
+  for (let i = 0; i < items.length; i += CONCURRENCY) {
+    await Promise.all(items.slice(i, i + CONCURRENCY).map(fn));
+  }
+}
+
 /**
  * Crash-recovery reconciler (runs once at boot; not a cron).
  *
- * Two failure modes after a crash are repaired here:
+ * Failure modes after a crash / Redis loss that are repaired here:
  *  1. Row stuck in SENDING  -> the process died after claiming but before the
  *     final DB write. Reconcile from the Bull job's true state if it exists.
- *  2. Row SCHEDULED but its Bull job is gone (enqueue failed, job TTL'd out,
- *     or Redis flushed) and it is now overdue -> re-enqueue it.
+ *  2. Row SCHEDULED but its Bull job is gone (enqueue failed mid-batch, job
+ *     TTL'd out, or Redis flushed) -> re-enqueue it for its ORIGINAL time
+ *     (not only when overdue: a flushed Redis would otherwise silently lose
+ *     every future email until it was already late).
+ *  3. Row SCHEDULED but its job terminally failed/stalled -> re-enqueue (stall)
+ *     or mirror the failure.
  *
  * Jobs carry deterministic ids (`send-<rowId>`), so re-adding can never
- * produce duplicate sends: BullMQ treats an existing id as the same job.
+ * produce duplicate sends. The DB claim gate in the worker is the last line
+ * of defence.
  */
 export async function startStaleReaper(): Promise<void> {
   try {
@@ -45,7 +62,7 @@ export async function startStaleReaper(): Promise<void> {
       where: { status: "SENDING", sentAt: null },
     });
 
-    for (const row of sending) {
+    await forEachLimited(sending, async (row) => {
       const job = await emailQueue.getJob(`send-${row.id}`);
       if (job) {
         const state = await job.getState();
@@ -56,52 +73,68 @@ export async function startStaleReaper(): Promise<void> {
           });
           await syncDoc(row, "SENT");
           logger.warn({ emailId: row.id }, "reconciled SENDING row to SENT from completed job");
-          continue;
+          return;
         }
-        if (state === "active" || state === "delayed" || state === "waiting") {
+        if (state === "active" || state === "delayed" || state === "waiting" || state === "prioritized") {
           await prisma.scheduledEmail.update({
             where: { id: row.id },
             data: { status: "SCHEDULED" },
           });
           logger.info({ emailId: row.id }, "reset SENDING row whose job is still pending");
-          continue;
+          return;
         }
       }
-      // No live job -> reschedule this row.
+      // No live job (missing, or failed/stalled out) -> reschedule this row.
       await rescheduleRow(row.id);
-    }
-
-    // --- Mode 2: overdue SCHEDULED rows with no live job ------------------
-    const cutoff = new Date(Date.now() - 60_000); // 1 min grace
-    const overdue = await prisma.scheduledEmail.findMany({
-      where: { status: "SCHEDULED", scheduledAt: { lte: cutoff } },
     });
 
-    for (const row of overdue) {
-      const job = await emailQueue.getJob(`send-${row.id}`);
-      if (!job) {
-        await rescheduleRow(row.id);
-      } else {
+    // --- Mode 2/3: SCHEDULED rows whose job is missing or terminal --------
+    let cursor: string | undefined;
+    let repaired = 0;
+    for (;;) {
+      const page = await prisma.scheduledEmail.findMany({
+        where: { status: "SCHEDULED" },
+        orderBy: { id: "asc" },
+        take: PAGE,
+        ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+      });
+      if (!page.length) break;
+      cursor = page[page.length - 1].id;
+
+      await forEachLimited(page, async (row) => {
+        const job = await emailQueue.getJob(`send-${row.id}`);
+        if (!job) {
+          await rescheduleRow(row.id);
+          repaired++;
+          return;
+        }
         const state = await job.getState();
         if (state === "completed") {
-          // Job terminal but row still SCHEDULED: sync from job outcome.
+          // Job terminal but row still SCHEDULED: the send happened.
           await prisma.scheduledEmail.update({
             where: { id: row.id },
             data: { status: "SENT", sentAt: new Date() },
           });
           await syncDoc(row, "SENT");
+          repaired++;
         } else if (state === "failed") {
-          // Job exhausted its attempts — reflect that in the row.
           const reason = job.failedReason ?? "exhausted retries";
-          await prisma.scheduledEmail.update({
-            where: { id: row.id },
-            data: { status: "FAILED", lastError: reason.slice(0, 500) },
-          });
-          await syncDoc(row, "FAILED", reason);
+          if (/stall/i.test(reason)) {
+            // A stall is infrastructure, not a delivery failure — try again.
+            await rescheduleRow(row.id);
+          } else {
+            await prisma.scheduledEmail.update({
+              where: { id: row.id },
+              data: { status: "FAILED", lastError: reason.slice(0, 500) },
+            });
+            await syncDoc(row, "FAILED", reason);
+          }
+          repaired++;
         }
         // 'waiting'/'delayed'/'active' jobs are fine — the worker owns them.
-      }
+      });
     }
+    if (repaired) logger.warn({ repaired }, "stale reaper repaired scheduled rows");
   } catch (err) {
     logger.error({ err }, "stale reaper failed");
   }
@@ -125,11 +158,25 @@ async function rescheduleRow(rowId: string): Promise<void> {
     batchId: row.batchId,
     userId: row.userId,
   };
+
+  // BullMQ ignores add() when a job with the same id still exists in ANY state
+  // (including failed / completed-but-retained), so drop a dead one first.
+  // Never touch a job that is currently active.
+  const existing = await emailQueue.getJob(`send-${row.id}`);
+  if (existing) {
+    const state = await existing.getState();
+    if (state === "active") return;
+    await existing.remove().catch(() => undefined);
+  }
+
+  // Keep the original target time (or the parked resume time) so future emails
+  // still go out when scheduled; overdue ones go out almost immediately.
+  const target = Math.max(row.scheduledAt.getTime(), row.nextAttemptAt?.getTime() ?? 0);
   await emailQueue.add("send", data, {
     jobId: `send-${row.id}`,
-    delay: 1000,
-    attempts: 3,
-    backoff: { type: "fixed", delay: 5000 },
+    delay: Math.max(1000, target - Date.now()),
+    attempts: config.worker.maxAttempts,
+    backoff: { type: "fixed", delay: config.worker.backoffMs },
   });
   logger.warn({ emailId: row.id }, "re-queued orphaned scheduled email");
 }

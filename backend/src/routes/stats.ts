@@ -1,11 +1,11 @@
-import { Router } from "express";
+import { safeRouter } from "../lib/safeRouter";
 import { connection, emailQueue } from "../lib/queue";
 import { getRateLimitSnapshot } from "../lib/rateLimiter";
 import { requireAuth } from "../middleware/auth";
 import { prisma } from "../lib/prisma";
 import { config } from "../config";
 
-const router = Router();
+const router = safeRouter();
 
 router.use(requireAuth);
 

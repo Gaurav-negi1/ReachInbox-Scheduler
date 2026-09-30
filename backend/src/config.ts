@@ -11,6 +11,14 @@ function num(name: string, def: number): number {
   return Number.isFinite(n) && n > 0 ? n : def;
 }
 
+/** Like num(), but 0 is a legal value (e.g. 0 = "unlimited" / "no delay"). */
+function nonNeg(name: string, def: number): number {
+  const v = process.env[name];
+  if (v === undefined || v.trim() === "") return def;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
 function str(name: string, def: string): string {
   return process.env[name] ?? def;
 }
@@ -62,15 +70,30 @@ export const config = {
 
   worker: {
     concurrency: num("WORKER_CONCURRENCY", 5),
-    minSendDelaySeconds: num("MIN_SEND_DELAY_SECONDS", 2),
-    maxPerHourGlobal: num("MAX_EMAILS_PER_HOUR", 200),
-    maxPerHourPerSender: num("MAX_EMAILS_PER_HOUR_PER_SENDER", 0),
+    // 0 disables the min-delay / the respective hourly cap.
+    minSendDelaySeconds: nonNeg("MIN_SEND_DELAY_SECONDS", 2),
+    maxPerHourGlobal: nonNeg("MAX_EMAILS_PER_HOUR", 200),
+    maxPerHourPerSender: nonNeg("MAX_EMAILS_PER_HOUR_PER_SENDER", 0),
     maxAttempts: num("MAX_ATTEMPTS", 5),
     backoffMs: num("BACKOFF_MS", 5000),
     jobRetentionMs: num("JOB_RETENTION_MS", 3_600_000),
     useFakeSmtpSink: bool("USE_FAKE_SMTP_SINK", false),
   },
 } as const;
+
+if (config.env === "production") {
+  const weak: string[] = [];
+  if (config.sessionSecret === "dev-only-secret-change-me" || config.sessionSecret.startsWith("dev-")) {
+    weak.push("SESSION_SECRET");
+  }
+  if (config.bullBoardPassword === "admin123" || config.bullBoardPassword.startsWith("admin")) {
+    weak.push("BULL_BOARD_PASSWORD");
+  }
+  if (weak.length) {
+    // eslint-disable-next-line no-console
+    console.warn(`[config] WARNING: weak/default values in production for: ${weak.join(", ")}`);
+  }
+}
 
 export const QUEUE_NAME = "email-send";
 export const SESSION_COOKIE = "ri_session";

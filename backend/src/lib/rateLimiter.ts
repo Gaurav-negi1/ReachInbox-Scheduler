@@ -2,26 +2,32 @@ import type Redis from "ioredis";
 import { config } from "../config";
 
 /**
- * Redis-backed, multi-instance-safe rate limiting + throttle for email sends.
+ * Redis-backed, multi-instance-safe hourly rate limiting for email sends.
  *
  * Keys:
  *   rl:hour:{hourWindow}:{scope}     -> count of sends in this hour window
- *   rl:throttle:global               -> ms timestamp when the next send is allowed
  *   rl:overflow:{window}:{scope}     -> overflow rank for limit-hit scopes
- *   rl:alert:{window}:{scope}        -> Slack alert dedupe (SET NX, multi-instance safe)
+ *   rl:alert:{kind}:{window}:{scope} -> alert dedupe (SET NX, multi-instance safe)
  *
- * hourWindow = floor(epochMs / 3600000). Counters expire after 2 hours.
+ * The min delay between individual sends is enforced as a slot RESERVATION in the
+ * same script: once the hourly caps pass, the caller is handed the next free
+ * send slot (`waitMs`, Redis-TIME based, shared by every worker/instance) and
+ * sleeps in-process until it. This avoids the thundering herd you get from
+ * "check throttle -> re-park the job -> everyone wakes together": each due job
+ * gets its own distinct slot, in arrival order, with no DB/queue churn. Jobs
+ * parked by an hourly cap never consume a throttle slot.
  *
- * A single atomic Lua script claims a send slot: the min-delay throttle and ALL
- * hourly caps (global, per-sender, per-batch) are checked-and-claimed in ONE
- * Redis round trip. The clock is Redis TIME, so multiple app servers with skewed
- * clocks can never collectively exceed a cap or sneak past the throttle. Redis
- * executes scripts serially, so check-then-increment inside the script is
- * race-free — a denied claim never consumes capacity.
+ * A single atomic Lua script checks-and-claims ALL hourly caps (global,
+ * per-sender, per-batch) in ONE Redis round trip. Redis executes scripts
+ * serially, so check-then-increment is race-free across any number of workers
+ * or app instances — a denied claim never consumes capacity.
+ *
+ * hourWindow = floor(epochMs / 3600000) (clock-hour aligned). Counters expire
+ * after 2 hours.
  *
  * When an hourly cap is hit, the caller takes a rank in the next window's
  * overflow queue and computes an exact future timestamp, so 1000+ emails drain
- * in arrival order, limit-per-window, instead of all retrying simultaneously.
+ * in arrival order, `limit` per window, instead of all retrying together.
  */
 
 const HOUR_SECONDS = 3600;
@@ -30,60 +36,69 @@ const THROTTLE_KEY = "rl:throttle:global";
 export type LimitReason = "global" | "sender" | "batch";
 
 export type ClaimResult =
-  | { allowed: true }
-  | { allowed: false; reason: "throttle" | LimitReason; retryAtMs: number };
+  | { allowed: true; waitMs: number }
+  | { allowed: false; reason: LimitReason; retryAtMs: number; queuedAhead: number };
 
 /**
- * KEYS[1] throttle key   KEYS[2] global counter   KEYS[3] sender counter   KEYS[4] batch counter
- * ARGV[1] minDelayMs     ARGV[2] globalCap        ARGV[3] senderCap        ARGV[4] batchCap
+ * KEYS[1] global counter   KEYS[2] sender counter   KEYS[3] batch counter
+ * KEYS[4] throttle cursor (ms timestamp of the next free send slot)
+ * ARGV[1] globalCap        ARGV[2] senderCap        ARGV[3] batchCap
+ * ARGV[4] minDelayMs
  * (cap <= 0 means "unlimited" for that scope; the script skips it)
  *
  * Returns:
- *   {1}                allowed — all counters incremented, throttle advanced
- *   {0, nextAllowedMs} min-delay throttle hit — nothing incremented
- *   {2, code}          hourly cap hit — code 2=global 3=sender 4=batch
+ *   {1, w}  allowed — all counters incremented, send slot reserved; the caller
+ *           must wait `w` ms (0 = send now) before sending
+ *   {2, c}  hourly cap hit — c: 2=global 3=sender 4=batch (nothing incremented)
  */
 const CLAIM_LUA = `
-local t = redis.call('TIME')
-local now = t[1] * 1000 + math.floor(t[2] / 1000)
+local globalCap = tonumber(ARGV[1])
+local senderCap = tonumber(ARGV[2])
+local batchCap  = tonumber(ARGV[3])
+local minDelay  = tonumber(ARGV[4])
 
--- 1) Min-delay throttle: key holds the ms timestamp when the next send is allowed.
-local nextAllowed = tonumber(redis.call('GET', KEYS[1]) or '0')
-if now < nextAllowed then
-  return {0, nextAllowed}
-end
-
--- 2) Per-sender hourly cap.
-local senderCap = tonumber(ARGV[3])
-if senderCap > 0 and tonumber(redis.call('GET', KEYS[3]) or '0') >= senderCap then
+if senderCap > 0 and tonumber(redis.call('GET', KEYS[2]) or '0') >= senderCap then
   return {2, 3}
 end
-
--- 3) Per-batch hourly cap (compose-time "Hourly Limit").
-local batchCap = tonumber(ARGV[4])
-if batchCap > 0 and tonumber(redis.call('GET', KEYS[4]) or '0') >= batchCap then
+if batchCap > 0 and tonumber(redis.call('GET', KEYS[3]) or '0') >= batchCap then
   return {2, 4}
 end
-
--- 4) Global hourly cap.
-local globalCap = tonumber(ARGV[2])
-if globalCap > 0 and tonumber(redis.call('GET', KEYS[2]) or '0') >= globalCap then
+if globalCap > 0 and tonumber(redis.call('GET', KEYS[1]) or '0') >= globalCap then
   return {2, 2}
 end
 
--- All checks passed: claim the slots (TTLs on first increment) and advance the throttle.
 if senderCap > 0 then
-  if redis.call('INCR', KEYS[3]) == 1 then redis.call('EXPIRE', KEYS[3], 7200) end
-end
-if batchCap > 0 then
-  if redis.call('INCR', KEYS[4]) == 1 then redis.call('EXPIRE', KEYS[4], 7200) end
-end
-if globalCap > 0 then
   if redis.call('INCR', KEYS[2]) == 1 then redis.call('EXPIRE', KEYS[2], 7200) end
 end
-local minDelay = tonumber(ARGV[1])
-redis.call('SET', KEYS[1], now + minDelay, 'PX', minDelay + 60000)
-return {1}
+if batchCap > 0 then
+  if redis.call('INCR', KEYS[3]) == 1 then redis.call('EXPIRE', KEYS[3], 7200) end
+end
+if globalCap > 0 then
+  if redis.call('INCR', KEYS[1]) == 1 then redis.call('EXPIRE', KEYS[1], 7200) end
+end
+
+-- Reserve the next free send slot (min-delay throttle) using Redis TIME so
+-- app servers with skewed clocks cannot collectively beat the throttle.
+local wait = 0
+if minDelay > 0 then
+  local t = redis.call('TIME')
+  local now = t[1] * 1000 + math.floor(t[2] / 1000)
+  local nextAt = tonumber(redis.call('GET', KEYS[4]) or '0')
+  local slot = now
+  if nextAt > now then slot = nextAt end
+  redis.call('SET', KEYS[4], slot + minDelay, 'PX', (slot - now) + minDelay + 60000)
+  wait = slot - now
+end
+return {1, wait}
+`;
+
+/** Decrement but never below zero, and never resurrect an expired key. */
+const RELEASE_LUA = `
+for i = 1, #KEYS do
+  local v = tonumber(redis.call('GET', KEYS[i]) or '0')
+  if v > 0 then redis.call('DECR', KEYS[i]) end
+end
+return 1
 `;
 
 export function hourWindow(atMs: number = Date.now()): number {
@@ -120,13 +135,13 @@ function scopeFor(reason: LimitReason, senderEmail: string, batchId?: string | n
  * in a window with capacity `limit` drains at windowStart + N*minDelay, spilling
  * into later windows once each window's capacity is full — arrival order kept.
  */
-async function overflowRetryAtMs(
+async function overflowRetryAt(
   redis: Redis,
   reason: LimitReason,
   senderEmail: string,
   batchId: string | null | undefined,
   limit: number
-): Promise<number> {
+): Promise<{ retryAtMs: number; queuedAhead: number }> {
   const nextWindow = hourWindow() + 1;
   const overflowKey = `rl:overflow:${nextWindow}:${scopeFor(reason, senderEmail, batchId)}`;
   const rank = await redis.incr(overflowKey);
@@ -135,16 +150,17 @@ async function overflowRetryAtMs(
   const capacity = Math.max(1, limit);
   const windowsAhead = 1 + Math.floor(idx / capacity);
   const posInWindow = idx % capacity;
-  return (
-    (nextWindow + windowsAhead - 1) * HOUR_SECONDS * 1000 +
-    posInWindow * config.worker.minSendDelaySeconds * 1000
-  );
+  return {
+    retryAtMs:
+      (nextWindow + windowsAhead - 1) * HOUR_SECONDS * 1000 +
+      posInWindow * config.worker.minSendDelaySeconds * 1000,
+    queuedAhead: idx,
+  };
 }
 
 /**
- * Atomically try to reserve permission to send one email now.
- * Order: min-delay throttle first (cheapest), then per-sender cap, then
- * per-batch cap (compose-time "Hourly Limit"), then global cap.
+ * Atomically try to reserve hourly capacity to send one email now.
+ * Order: per-sender cap, per-batch cap (compose-time "Hourly Limit"), global cap.
  */
 export async function tryClaimSendSlot(
   redis: Redis,
@@ -155,62 +171,83 @@ export async function tryClaimSendSlot(
   const globalCap = Math.max(0, Math.floor(config.worker.maxPerHourGlobal));
   const senderCap = Math.max(0, Math.floor(config.worker.maxPerHourPerSender));
   const batchCap = batchId && batchLimit && batchLimit > 0 ? Math.floor(batchLimit) : 0;
-  const minDelayMs = config.worker.minSendDelaySeconds * 1000;
 
+  const minDelayMs = Math.max(0, Math.floor(config.worker.minSendDelaySeconds * 1000));
+
+  const now = Date.now();
   const result = (await redis.eval(
     CLAIM_LUA,
     4,
+    globalHourKey(now),
+    senderHourKey(senderEmail, now),
+    batchHourKey(batchId ?? "none", now),
     THROTTLE_KEY,
-    globalHourKey(),
-    senderHourKey(senderEmail),
-    batchHourKey(batchId ?? "none"),
-    String(minDelayMs),
     String(globalCap),
     String(senderCap),
-    String(batchCap)
+    String(batchCap),
+    String(minDelayMs)
   )) as [number, number?];
 
-  if (result[0] === 1) return { allowed: true };
-
-  if (result[0] === 0) {
-    // Min-delay throttle: the script returned the exact next-allowed timestamp.
-    return { allowed: false, reason: "throttle", retryAtMs: Number(result[1]) };
-  }
+  if (result[0] === 1) return { allowed: true, waitMs: Number(result[1] ?? 0) };
 
   // Hourly cap hit — nothing was incremented. Take an ordered overflow slot in
   // the next window so waiting jobs drain in arrival order, limit per window.
   const code = Number(result[1]);
   const reason: LimitReason = code === 3 ? "sender" : code === 4 ? "batch" : "global";
   const limit = reason === "global" ? globalCap : reason === "sender" ? senderCap : batchCap;
-  const retryAtMs = await overflowRetryAtMs(redis, reason, senderEmail, batchId, limit);
-  return { allowed: false, reason, retryAtMs };
+  const { retryAtMs, queuedAhead } = await overflowRetryAt(redis, reason, senderEmail, batchId, limit);
+  return { allowed: false, reason, retryAtMs, queuedAhead };
 }
 
-export function releaseHourlySlots(
+/**
+ * Give back the capacity claimed by tryClaimSendSlot (used when an SMTP attempt
+ * fails, so a failed attempt does not permanently consume the hourly budget).
+ * `claimedAtMs` pins the release to the window the slot was claimed in.
+ */
+export async function releaseHourlySlots(
   redis: Redis,
   senderEmail: string,
-  batchId?: string | null,
-  batchLimit?: number | null
+  batchId: string | null | undefined,
+  batchLimit: number | null | undefined,
+  claimedAtMs: number = Date.now()
 ): Promise<void> {
-  // Called when an SMTP send ultimately fails, so a failed attempt does not
-  // permanently consume rate-limit capacity.
-  const decrements: Array<Promise<unknown>> = [];
-  if (config.worker.maxPerHourGlobal > 0) decrements.push(redis.decr(globalHourKey()));
-  if (config.worker.maxPerHourPerSender > 0) decrements.push(redis.decr(senderHourKey(senderEmail)));
-  if (batchId && batchLimit && batchLimit > 0) decrements.push(redis.decr(batchHourKey(batchId)));
-  return Promise.all(decrements).then(() => undefined);
+  const keys: string[] = [];
+  if (config.worker.maxPerHourGlobal > 0) keys.push(globalHourKey(claimedAtMs));
+  if (config.worker.maxPerHourPerSender > 0) keys.push(senderHourKey(senderEmail, claimedAtMs));
+  if (batchId && batchLimit && batchLimit > 0) keys.push(batchHourKey(batchId, claimedAtMs));
+  if (!keys.length) return;
+  await redis.eval(RELEASE_LUA, keys.length, ...keys);
 }
 
-/** True only for the first limit-hit per scope per window — Redis NX dedupe (multi-instance safe). */
+export type AlertKind = "app" | "slack";
+
+/**
+ * True only for the first caller per (kind, scope, window) — Redis NX dedupe
+ * (multi-instance safe). `app` dedupes the in-app alert row; `slack` dedupes
+ * the Slack message separately so that connecting Slack mid-window still gets
+ * the next hit delivered.
+ */
 export async function shouldAlertRateLimit(
   redis: Redis,
   reason: LimitReason,
   senderEmail: string,
-  batchId?: string | null
+  batchId?: string | null,
+  kind: AlertKind = "app"
 ): Promise<boolean> {
-  const key = `rl:alert:${hourWindow()}:${scopeFor(reason, senderEmail, batchId)}`;
+  const key = `rl:alert:${kind}:${hourWindow()}:${scopeFor(reason, senderEmail, batchId)}`;
   const result = await redis.set(key, "1", "EX", 7200, "NX");
   return result === "OK";
+}
+
+/** Undo an alert claim (e.g. Slack delivery failed / Slack not connected). */
+export async function releaseAlert(
+  redis: Redis,
+  reason: LimitReason,
+  senderEmail: string,
+  batchId?: string | null,
+  kind: AlertKind = "app"
+): Promise<void> {
+  await redis.del(`rl:alert:${kind}:${hourWindow()}:${scopeFor(reason, senderEmail, batchId)}`);
 }
 
 export async function getRateLimitSnapshot(redis: Redis): Promise<{
@@ -223,12 +260,16 @@ export async function getRateLimitSnapshot(redis: Redis): Promise<{
   const globalCount = Number((await redis.get(globalHourKey())) ?? 0);
   const perSender: Record<string, number> = {};
   if (config.worker.maxPerHourPerSender > 0) {
-    const pattern = `rl:hour:${hourWindow()}:sender:*`;
-    const keys = await redis.keys(pattern);
-    for (const key of keys) {
-      const email = key.slice(pattern.length - 1);
-      perSender[email] = Number((await redis.get(key)) ?? 0);
-    }
+    const prefix = `rl:hour:${hourWindow()}:sender:`;
+    // SCAN (non-blocking) instead of KEYS, which is O(N) and blocks Redis.
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(cursor, "MATCH", `${prefix}*`, "COUNT", 200);
+      cursor = next;
+      for (const key of keys) {
+        perSender[key.slice(prefix.length)] = Number((await redis.get(key)) ?? 0);
+      }
+    } while (cursor !== "0");
   }
   return {
     globalSentThisHour: globalCount,

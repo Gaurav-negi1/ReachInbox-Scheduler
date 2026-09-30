@@ -117,6 +117,31 @@ export async function indexEmail(doc: EmailDoc): Promise<void> {
   }
 }
 
+/**
+ * Bulk-mirror many documents in one request (chunked). Best-effort like
+ * indexEmail: never throws. Used for big schedule batches (10k docs) and the
+ * boot-time resync, instead of one HTTP request per email.
+ */
+export async function bulkIndexEmails(docs: EmailDoc[], chunkSize = 500): Promise<void> {
+  for (let i = 0; i < docs.length; i += chunkSize) {
+    if (!esAvailable()) return;
+    const chunk = docs.slice(i, i + chunkSize);
+    try {
+      const resp = await esClient.bulk({
+        refresh: false,
+        operations: chunk.flatMap((doc) => [
+          { index: { _index: EMAILS_INDEX, _id: doc.id } },
+          { ...doc, lastError: doc.lastError ?? null },
+        ]),
+      });
+      if (resp.errors) logger.debug({ chunk: chunk.length }, "elasticsearch bulk index had item errors");
+    } catch (err) {
+      tripBreaker(err);
+      return;
+    }
+  }
+}
+
 export async function deleteEmailDoc(id: string): Promise<void> {
   if (!esAvailable()) return;
   try {
