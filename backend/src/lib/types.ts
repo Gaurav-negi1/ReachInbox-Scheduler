@@ -18,6 +18,7 @@ export interface ScheduledEmailDTO {
   status: "SCHEDULED" | "SENDING" | "SENT" | "FAILED" | "CANCELLED";
   scheduledAt: string;
   sentAt: string | null;
+  nextAttemptAt?: string | null;
   attemptCount: number;
   lastError?: string | null;
   source: "API" | "CSV";

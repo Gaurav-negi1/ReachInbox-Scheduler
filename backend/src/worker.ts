@@ -55,7 +55,7 @@ async function processEmailJob(job: Job, token?: string): Promise<void> {
   // (already SENT / SENDING elsewhere / CANCELLED) we simply finish.
   const claim = await prisma.$queryRaw<Array<{ id: string; status: string }>>`
     UPDATE "ScheduledEmail"
-    SET status = 'SENDING', "attemptCount" = "attemptCount" + 1, "updatedAt" = now()
+    SET status = 'SENDING', "attemptCount" = "attemptCount" + 1, "nextAttemptAt" = NULL, "updatedAt" = now()
     WHERE id = ${emailRecordId} AND status IN ('SCHEDULED', 'SENDING')
     RETURNING id, status
   `;
@@ -74,16 +74,21 @@ async function processEmailJob(job: Job, token?: string): Promise<void> {
   // Rate limiting + throttle: atomically claim a send slot in Redis.
   const slot = await tryClaimSendSlot(connection, senderEmail, row.batchId, row.hourlyLimit);
   if (!slot.allowed) {
-    // Release the claim and move the ACTIVE job into BullMQ's delayed state —
-    // nothing is dropped or failed; order is preserved via overflow ranks.
-    await prisma.scheduledEmail.update({
-      where: { id: emailRecordId },
-      data: { status: "SCHEDULED", lastError: null },
-    });
     // slot.retryAtMs is absolute, Redis-TIME-based; add a small buffer so the
     // job becomes ready strictly after the window/throttle opens.
     const resumeAt = Math.max(Date.now() + 1000, slot.retryAtMs + 250);
-    await job.moveToDelayed(resumeAt, token);
+    // Release the claim and move the ACTIVE job into BullMQ's delayed state —
+    // nothing is dropped or failed; order is preserved via overflow ranks.
+    // The resume time is persisted so the UI can show when a parked email
+    // will actually attempt to send.
+    await prisma.scheduledEmail.update({
+      where: { id: emailRecordId },
+      data: {
+        status: "SCHEDULED",
+        lastError: null,
+        nextAttemptAt: new Date(resumeAt),
+      },
+    });
     logger.info(
       { jobId: job.id, reason: slot.reason, resumeAt: new Date(resumeAt).toISOString() },
       "rate limit / throttle hit — job moved to delayed state"
@@ -113,7 +118,7 @@ async function processEmailJob(job: Job, token?: string): Promise<void> {
     const sentAt = new Date();
     await prisma.scheduledEmail.update({
       where: { id: emailRecordId },
-      data: { status: "SENT", sentAt, lastError: null },
+      data: { status: "SENT", sentAt, lastError: null, nextAttemptAt: null },
     });
 
     // Mirror into Elasticsearch only after the DB commit. indexEmail is
@@ -150,6 +155,7 @@ async function processEmailJob(job: Job, token?: string): Promise<void> {
       data: {
         status: isFinalAttempt ? "FAILED" : "SCHEDULED",
         lastError: message.slice(0, 500),
+        nextAttemptAt: null,
       },
     });
 
@@ -186,6 +192,32 @@ export function startWorker(): Worker {
   worker.on("completed", (job) => logger.debug({ jobId: job.id }, "job completed"));
   worker.on("failed", (job, err) => {
     logger.error({ jobId: job?.id, err: err.message }, "job failed (will retry per backoff)");
+    // Stalls (process killed mid-job, event-loop freeze) bypass remaining
+    // attempts with UnrecoverableError. The email itself is fine — re-enqueue
+    // it so it sends on the next pass instead of lingering forever. The DB
+    // claim gate + deterministic job id keep this at-most-once.
+    if (job && /stall/i.test(err.message)) {
+      void (async () => {
+        try {
+          const row = await prisma.scheduledEmail.findUnique({ where: { id: job.data.emailRecordId } });
+          if (!row || row.status !== "SCHEDULED") return;
+          await job.remove().catch(() => undefined);
+          await emailQueue.add(
+            "send",
+            job.data,
+            {
+              jobId: job.id,
+              delay: 2_000,
+              attempts: config.worker.maxAttempts,
+              backoff: { type: "fixed", delay: config.worker.backoffMs },
+            }
+          );
+          logger.warn({ jobId: job.id, emailId: row.id }, "stalled job re-enqueued for delivery");
+        } catch (requeueErr) {
+          logger.error({ jobId: job.id, err: requeueErr }, "failed to re-enqueue stalled job");
+        }
+      })();
+    }
   });
   worker.on("error", (err) => logger.error({ err: err.message }, "worker error"));
 

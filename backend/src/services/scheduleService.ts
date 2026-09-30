@@ -16,6 +16,7 @@ export function toDTO(e: ScheduledEmail): ScheduledEmailDTO {
     status: e.status,
     scheduledAt: e.scheduledAt.toISOString(),
     sentAt: e.sentAt?.toISOString() ?? null,
+    nextAttemptAt: e.nextAttemptAt?.toISOString() ?? null,
     attemptCount: e.attemptCount,
     lastError: e.lastError,
     source: e.source,

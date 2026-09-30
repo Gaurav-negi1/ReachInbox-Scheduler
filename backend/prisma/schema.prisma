@@ -69,6 +69,7 @@ model ScheduledEmail {
   starred        Boolean     @default(false)
   bodyHtml       String?     // rich-text HTML body (sanitized again on display)
   batchId        String?
+  nextAttemptAt  DateTime?   // worker-computed resume time while parked by throttle/caps
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
   attachments    Attachment[]

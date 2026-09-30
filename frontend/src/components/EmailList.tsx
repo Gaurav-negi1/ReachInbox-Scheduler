@@ -164,20 +164,33 @@ export function EmailList({
                     To: {e.recipientEmail}
                   </span>
 
-                  {/* Time pill */}
-                  <span
-                    className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${
-                      mode === "scheduled"
-                        ? "bg-amber-50 text-amber-700 ring-amber-200"
-                        : "bg-brand-50 text-brand-700 ring-brand-200"
-                    }`}
-                  >
-                    <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                      <circle cx="12" cy="12" r="9" />
-                      <path strokeLinecap="round" d="M12 7v5l3 2" />
-                    </svg>
-                    {mode === "scheduled" ? timeChip(e.scheduledAt) : dayChip(e.sentAt)}
-                  </span>
+                  {/* Time pill; parked emails show their real resume time */}
+                  {mode === "scheduled" && e.nextAttemptAt ? (
+                    <span
+                      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-medium text-blue-700 ring-1 ring-inset ring-blue-200"
+                      title={`Rate limit or throttle — will attempt to send at ${new Date(e.nextAttemptAt).toLocaleString()}`}
+                    >
+                      <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="9" />
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 10h3l-4 4-4-4h3V7m-5 12h8" />
+                      </svg>
+                      {timeChip(e.scheduledAt)} → {dayChip(e.nextAttemptAt)}
+                    </span>
+                  ) : (
+                    <span
+                      className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${
+                        mode === "scheduled"
+                          ? "bg-amber-50 text-amber-700 ring-amber-200"
+                          : "bg-brand-50 text-brand-700 ring-brand-200"
+                      }`}
+                    >
+                      <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="9" />
+                        <path strokeLinecap="round" d="M12 7v5l3 2" />
+                      </svg>
+                      {mode === "scheduled" ? timeChip(e.scheduledAt) : dayChip(e.sentAt)}
+                    </span>
+                  )}
 
                   {/* Subject + status + preview */}
                   <span className="min-w-0 flex-1 truncate text-sm text-gray-500">

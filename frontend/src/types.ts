@@ -17,6 +17,7 @@ export interface ScheduledEmail {
   status: EmailStatus;
   scheduledAt: string;
   sentAt: string | null;
+  nextAttemptAt?: string | null;
   attemptCount: number;
   lastError?: string | null;
   source: "API" | "CSV";

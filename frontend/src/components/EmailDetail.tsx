@@ -74,6 +74,11 @@ export function EmailDetail({
             </div>
             <div className="text-right">
               <div className="text-xs text-gray-400">{fmtLong(email.sentAt ?? email.scheduledAt)}</div>
+              {email.status === "SCHEDULED" && email.nextAttemptAt && (
+                <div className="mt-1 text-[11px] font-medium text-blue-600">
+                  Retrying {fmtLong(email.nextAttemptAt)} (rate limit)
+                </div>
+              )}
               <span
                 className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ring-inset ${
                   email.status === "SENT"
