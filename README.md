@@ -311,12 +311,14 @@ everything and the frontend's relative `/api` calls need no CORS or proxy setup.
    community **Elasticsearch** template in the same project.
 3. **Variables** (app service) — `NODE_ENV=production`,
    `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `REDIS_URL=${{Redis.REDIS_URL}}`,
-   `ELASTICSEARCH_URL=<ES service internal URL>`, `SESSION_SECRET`,
-   `BULL_BOARD_USER`/`BULL_BOARD_PASSWORD`, `FRONTEND_URL` / `CORS_ORIGINS` /
-   `GOOGLE_REDIRECT_URI` / `SLACK_REDIRECT_URI` set to the Railway domain, and the
-   Google/Slack OAuth credentials. (`--include=dev` in the build command matters:
-   production npm installs skip devDependencies, and TypeScript/Vite are needed to
-   build.)
+   `ELASTICSEARCH_URL=<ES service internal URL>`, plus
+   `ELASTICSEARCH_USERNAME=elastic` and `ELASTICSEARCH_PASSWORD=<the ES service's
+   ELASTIC_PASSWORD value>` (Railway's ES template ships with security enabled),
+   `SESSION_SECRET`, `BULL_BOARD_USER`/`BULL_BOARD_PASSWORD`, `FRONTEND_URL` /
+   `CORS_ORIGINS` / `GOOGLE_REDIRECT_URI` / `SLACK_REDIRECT_URI` set to the
+   Railway domain, and the Google/Slack OAuth credentials. (`--include=dev` in
+   the build command matters: production npm installs skip devDependencies, and
+   TypeScript/Vite are needed to build.)
 4. **Domain** — app service → Settings → Networking → Generate Domain (port 4000).
 5. **OAuth redirects** — add `<railway-url>/api/auth/google/callback` in Google Cloud
    Console and `<railway-url>/api/slack/callback` in the Slack app settings.
