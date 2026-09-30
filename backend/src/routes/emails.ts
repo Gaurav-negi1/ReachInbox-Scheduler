@@ -5,6 +5,7 @@ import { toDTO, ScheduleService } from "../services/scheduleService";
 import { requireAuth } from "../middleware/auth";
 import { logger } from "../logger";
 import type { EmailDoc } from "../lib/elasticsearch";
+import { esAvailable } from "../lib/elasticsearch";
 
 const router = Router();
 
@@ -196,28 +197,38 @@ router.get("/sent", requireAuth, async (req, res) => {
   const search = (req.query.search as string | undefined)?.trim();
   const filter = parseFilter(req.query.filter);
 
-  try {
-    const { searchEmails } = await import("../lib/elasticsearch");
-    const result = await searchEmails({
-      userId,
-      query: search,
-      status: filter === "failed" ? ["FAILED"] : SENT_STATUSES,
-      starred: filter === "starred" ? true : undefined,
-      page,
-      pageSize,
-    });
-    const items: EmailDoc[] = result.items;
-    // ES docs carry no attachment rows; look up summaries per doc id.
-    const emailRows = items.map((i) => ({ id: i.id, batchId: i.batchId ?? null }));
-    const atts = await attachmentSummaries(emailRows);
-    res.json({
-      total: result.total,
-      page,
-      pageSize,
-      items: items.map((i) => ({ ...i, attachments: atts.get(i.id) ?? [] })),
-    });
-  } catch (err) {
-    logger.error({ err }, "elasticsearch search failed — falling back to Postgres");
+  // Elasticsearch is a best-effort layer: while the circuit breaker reports it
+  // down, skip straight to the Postgres fallback (fast, no error noise).
+  if (esAvailable()) {
+    try {
+      const { searchEmails } = await import("../lib/elasticsearch");
+      const result = await searchEmails({
+        userId,
+        query: search,
+        status: filter === "failed" ? ["FAILED"] : SENT_STATUSES,
+        starred: filter === "starred" ? true : undefined,
+        page,
+        pageSize,
+      });
+      const items: EmailDoc[] = result.items;
+      // ES docs carry no attachment rows; look up summaries per doc id.
+      const emailRows = items.map((i) => ({ id: i.id, batchId: i.batchId ?? null }));
+      const atts = await attachmentSummaries(emailRows);
+      res.json({
+        total: result.total,
+        page,
+        pageSize,
+        items: items.map((i) => ({ ...i, attachments: atts.get(i.id) ?? [] })),
+      });
+      return;
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "elasticsearch search failed — falling back to Postgres");
+    }
+  }
+  // Postgres fallback: Postgres is the source of truth, so the list still
+  // works (with `degraded: true` so the client can badge it) whenever ES is
+  // unreachable or returns an error.
+  {
     const where = {
       status: { in: filter === "failed" ? (["FAILED"] as ("SENT" | "FAILED")[]) : SENT_STATUSES },
       ...(filter === "starred" ? { starred: true } : {}),

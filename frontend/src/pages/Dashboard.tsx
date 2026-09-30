@@ -34,25 +34,28 @@ export function Dashboard() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = { search: search || undefined, filter, pageSize: 100 };
-      if (tab === "scheduled") {
-        const res = await api.scheduled(params);
-        setScheduled(res.items);
-        setScheduledTotal(res.total);
-      } else {
-        const res = await api.sent(params);
-        setSent(res.items);
-        setSentTotal(res.total);
+  const load = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!opts?.silent) setLoading(true);
+      try {
+        const params = { search: search || undefined, filter, pageSize: 100 };
+        if (tab === "scheduled") {
+          const res = await api.scheduled(params);
+          setScheduled(res.items);
+          setScheduledTotal(res.total);
+        } else {
+          const res = await api.sent(params);
+          setSent(res.items);
+          setSentTotal(res.total);
+        }
+      } catch (err) {
+        if (!opts?.silent) showToast(err instanceof Error ? err.message : "Failed to load emails", "error");
+      } finally {
+        if (!opts?.silent) setLoading(false);
       }
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Failed to load emails", "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [tab, search, filter, showToast]);
+    },
+    [tab, search, filter, showToast]
+  );
 
   useEffect(() => {
     const t = setTimeout(() => void load(), 250); // debounce search
@@ -64,7 +67,7 @@ export function Dashboard() {
   useEffect(() => {
     const t = setInterval(() => {
       if (view.name !== "list" || document.hidden) return;
-      void load();
+      void load({ silent: true });
     }, 10_000);
     return () => clearInterval(t);
   }, [load, view.name]);

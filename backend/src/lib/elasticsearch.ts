@@ -5,9 +5,41 @@ import { logger } from "../logger";
 
 export const EMAILS_INDEX = "emails";
 
+/**
+ * Circuit breaker for the best-effort search layer. When Elasticsearch is
+ * unreachable (e.g. no ES host provisioned in a deployment), requests would
+ * otherwise burn the client's internal retries on every list/search call.
+ * Once a failure is seen, all ES calls short-circuit instantly for a cooldown
+ * window, then a single probe is allowed through to re-detect recovery.
+ */
+let esDownUntil = 0;
+let lastBreakerLogAt = 0;
+const ES_COOLDOWN_MS = 30_000;
+const BREAKER_LOG_SUPPRESS_MS = 60_000;
+
+export function esAvailable(): boolean {
+  return Date.now() >= esDownUntil;
+}
+
+function tripBreaker(err: unknown): void {
+  esDownUntil = Date.now() + ES_COOLDOWN_MS;
+  const now = Date.now();
+  if (now - lastBreakerLogAt > BREAKER_LOG_SUPPRESS_MS) {
+    lastBreakerLogAt = now;
+    logger.warn(
+      { err: (err as Error).message, retryProbeInMs: ES_COOLDOWN_MS },
+      "elasticsearch unreachable — search degraded to Postgres (circuit open)"
+    );
+  }
+}
+
 export const esClient = new Client({
   node: config.elasticsearchUrl,
   ...(config.elasticsearchApiKey ? { auth: { apiKey: config.elasticsearchApiKey } } : {}),
+  // Fail fast: search is best-effort, so a dead ES must not hold HTTP requests
+  // for the client's default 30s timeout × 3 retries.
+  requestTimeout: 3_000,
+  maxRetries: 0,
 });
 
 const EMAILS_MAPPING: MappingTypeMapping = {
@@ -33,6 +65,7 @@ const EMAILS_MAPPING: MappingTypeMapping = {
  * scheduling or sending. Callers (schedule flow, boot) rely on this guarantee.
  */
 export async function ensureEmailsIndex(): Promise<void> {
+  if (!esAvailable()) return;
   try {
     const exists = await esClient.indices.exists({ index: EMAILS_INDEX });
     if (!exists) {
@@ -44,7 +77,7 @@ export async function ensureEmailsIndex(): Promise<void> {
       logger.info({ index: EMAILS_INDEX }, "elasticsearch index created");
     }
   } catch (err) {
-    logger.warn({ err: (err as Error).message }, "elasticsearch unavailable — search will fall back to Postgres");
+    tripBreaker(err);
   }
 }
 
@@ -70,6 +103,7 @@ export type EmailDoc = {
  * want explicit handling can still catch; a warn-level log is recorded here.
  */
 export async function indexEmail(doc: EmailDoc): Promise<void> {
+  if (!esAvailable()) return;
   try {
     await esClient.index({
       index: EMAILS_INDEX,
@@ -78,21 +112,18 @@ export async function indexEmail(doc: EmailDoc): Promise<void> {
       refresh: false,
     });
   } catch (err) {
-    logger.warn(
-      { emailId: doc.id, err: (err as Error).message },
-      "elasticsearch index failed (search may be stale) — non-fatal"
-    );
+    tripBreaker(err);
+    logger.debug({ emailId: doc.id }, "elasticsearch index skipped (search may be stale)");
   }
 }
 
 export async function deleteEmailDoc(id: string): Promise<void> {
+  if (!esAvailable()) return;
   try {
     await esClient.delete({ index: EMAILS_INDEX, id }, { ignore: [404] });
   } catch (err) {
-    logger.warn(
-      { emailId: id, err: (err as Error).message },
-      "elasticsearch delete failed — non-fatal"
-    );
+    tripBreaker(err);
+    logger.debug({ emailId: id }, "elasticsearch delete skipped");
   }
 }
 
@@ -128,6 +159,8 @@ export async function searchEmails(params: SearchParams): Promise<{
       },
     });
   }
+
+  if (!esAvailable()) throw new Error("elasticsearch circuit open — use Postgres fallback");
 
   const resp = await esClient.search({
     index: EMAILS_INDEX,

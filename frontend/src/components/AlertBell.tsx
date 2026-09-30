@@ -12,16 +12,30 @@ const POLL_MS = 10_000;
 export function AlertBell() {
   const [alerts, setAlerts] = useState<RateLimitAlert[]>([]);
   const [open, setOpen] = useState(false);
+  const [popup, setPopup] = useState<RateLimitAlert | null>(null);
   const [lastSeen, setLastSeen] = useState<number>(() => {
     const raw = Number(localStorage.getItem("alertsLastSeenMs"));
     return Number.isFinite(raw) && raw > 0 ? raw : 0;
   });
   const wrapRef = useRef<HTMLDivElement>(null);
+  const seenRef = useRef<number>(0);
+  const firstLoadRef = useRef(true);
 
   const refresh = () => {
     api
       .alerts(lastSeen)
-      .then((r) => setAlerts(r.items))
+      .then((r) => {
+        setAlerts(r.items);
+        // Pop up (once) whenever an alert newer than everything we have seen
+        // arrives. The very first load only adopts history — no popup for
+        // events that predate this page view.
+        const newest = r.items[0] ? Date.parse(r.items[0].createdAt) : 0;
+        if (newest > seenRef.current) {
+          if (!firstLoadRef.current && newest > lastSeen) setPopup(r.items[0]);
+          seenRef.current = newest;
+        }
+        firstLoadRef.current = false;
+      })
       .catch(() => undefined);
   };
 
@@ -34,6 +48,13 @@ export function AlertBell() {
     }, POLL_MS);
     return () => clearInterval(t);
   }, [lastSeen]);
+
+  // Auto-dismiss the popup after a few seconds.
+  useEffect(() => {
+    if (!popup) return;
+    const t = setTimeout(() => setPopup(null), 8_000);
+    return () => clearTimeout(t);
+  }, [popup]);
 
   // Close on outside click / Escape.
   useEffect(() => {
@@ -62,6 +83,9 @@ export function AlertBell() {
     }
   };
 
+  const popupSummary = (a: RateLimitAlert) =>
+    a.reason === "global" ? "Global hourly limit reached" : `${a.scope} reached its hourly limit`;
+
   const describe = (a: RateLimitAlert) => {
     const scope = a.reason === "global" ? "Global hourly limit" : a.scope;
     const when = new Date(a.createdAt).toLocaleString(undefined, {
@@ -75,6 +99,31 @@ export function AlertBell() {
 
   return (
     <div ref={wrapRef} className="relative">
+      {/* Popup: a rate-limit alert just fired */}
+      {popup && (
+        <div className="fixed right-5 top-5 z-[80] w-80">
+          <button
+            onClick={() => {
+              setPopup(null);
+              setOpen(true);
+            }}
+            className="flex w-full items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left shadow-lg transition hover:bg-amber-100"
+          >
+            <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-600">
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+              </svg>
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold text-amber-900">Rate limit hit</span>
+              <span className="mt-0.5 block text-xs text-amber-800">
+                {popupSummary(popup)} · {popup.queuedAhead} parked — sending resumes next window.
+              </span>
+              {popup.slackSent && <span className="mt-1 block text-[11px] text-amber-700">Slack notification sent</span>}
+            </span>
+          </button>
+        </div>
+      )}
       <button
         onClick={toggleOpen}
         title="Rate-limit alerts"

@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "worker": "tsx src/worker.ts",
     "worker:dev": "tsx watch src/worker.ts",
+    "reset-data": "tsx scripts/reset-data.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prisma:generate": "prisma generate",
     "postinstall": "prisma generate",
