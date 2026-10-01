@@ -1,12 +1,13 @@
 [build]
 builder = "NIXPACKS"
 # NODE_ENV=production makes npm skip devDependencies, which the TypeScript
-# build needs — same fix as the Render deploy. prisma:deploy retries because
-# Railway can start the app before Postgres finishes booting (P1001 race).
-buildCommand = "npm install --include=dev && npm run build --workspaces && (npm run prisma:deploy --workspace backend || (sleep 15 && npm run prisma:deploy --workspace backend) || (sleep 30 && npm run prisma:deploy --workspace backend))"
+# build needs. Migrations CANNOT run here: Railway builders have no access to
+# the environment's private network (postgres.railway.internal is unreachable
+# from builds — P1001), so prisma:deploy runs in the start command instead.
+buildCommand = "npm install --include=dev && npm run build --workspaces"
 
 [deploy]
-startCommand = "npm run start --workspace backend"
+startCommand = "npm run prisma:deploy --workspace backend && npm run start --workspace backend"
 healthcheckPath = "/healthz"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
