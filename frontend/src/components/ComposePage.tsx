@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import { RichTextEditor, stripHtml } from "./RichTextEditor";
 import { FileCard } from "./FileCard";
 import type { Sender, ScheduleResponse } from "../types";
@@ -55,12 +56,12 @@ export function ComposePage({
   onScheduled: () => void;
   toast: (msg: string, kind: "success" | "error" | "info") => void;
 }) {
+  const { user } = useAuth();
   const [senders, setSenders] = useState<Sender[]>([]);
-  const [senderEmail, setSenderEmail] = useState("");
-  // When the user has no senders yet (fresh account / after a data reset), the
-  // From field becomes an editable input: the first send provisions the typed
-  // address under THIS account. The old hardcoded fallback option made that
-  // impossible — it always suggested an address another user may already own.
+  // From defaults to the logged-in Google account's own email — every user can
+  // send immediately, and the first send provisions a fresh Ethereal SMTP
+  // account under THIS user (no cross-user ownership conflicts possible).
+  const [senderEmail, setSenderEmail] = useState(user?.email ?? "");
   const [newSenderMode, setNewSenderMode] = useState(false);
   const [recipients, setRecipients] = useState<string[]>([]);
   const [toInput, setToInput] = useState("");
@@ -263,8 +264,8 @@ export function ComposePage({
                 <input
                   value={senderEmail}
                   onChange={(e) => setSenderEmail(e.target.value)}
-                  placeholder="outreach@reachinbox.test"
-                  title="Type any From address — a fresh Ethereal SMTP account is provisioned for it on first send"
+                  placeholder="you@example.com"
+                  title="Defaults to your Google account email — a fresh Ethereal SMTP account is provisioned for it on first send"
                   className="w-72 rounded-lg bg-gray-100 py-2 pl-3 pr-3 text-sm font-medium text-gray-800 outline-none focus:ring-2 focus:ring-brand-200"
                 />
               ) : (
