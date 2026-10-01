@@ -4,11 +4,17 @@ A production-grade **email scheduling service + dashboard**: schedule thousands 
 
 ## Live demo
 
-**URL:** https://<railway-app>.up.railway.app — live after the first Railway deploy
+**URL:** https://app-production-97a0.up.railway.app
 
 Hosted on Railway (backend + frontend served from one origin in production mode). Notes:
 - Login uses **real Google OAuth**, so a live Google client must be configured for this domain.
-- Sends go out over **real Ethereal SMTP** with preview URLs — Railway allows outbound SMTP, so the deployed instance behaves exactly like a local run.
+- **SMTP note:** Railway's Trial/Hobby plans block outbound SMTP ports (Pro only —
+  [Railway docs](https://docs.railway.com/networking/outbound-networking)), so on this
+  deployment SMTP sends cannot reach Ethereal and the affected rows surface as
+  `FAILED` with connection timeouts. Everything else — scheduling, persistence,
+  rate limiting, Slack alerts, Elasticsearch search, Bull Board — runs fully live.
+  Run locally (where Ethereal works end-to-end) to see **real sends with preview
+  URLs**; the demo video covers both.
 
 Local setup and self-hosting instructions are below.
 
@@ -323,7 +329,8 @@ everything and the frontend's relative `/api` calls need no CORS or proxy setup.
 5. **OAuth redirects** — add `<railway-url>/api/auth/google/callback` in Google Cloud
    Console and `<railway-url>/api/slack/callback` in the Slack app settings.
 
-Sends go out over **real Ethereal SMTP** (Railway allows outbound port 587). If
+Sends go out over **real Ethereal SMTP** (Railway Pro allows outbound port 587;
+Trial/Hobby plans block it — see the note at the top of this README). If
 Elasticsearch is not provisioned, sent-email search degrades to Postgres
 (responses carry `"degraded": true`).
 
