@@ -98,7 +98,11 @@ export const ScheduleService = {
     if (sender && sender.userId && input.userId && sender.userId !== input.userId) {
       // Senders carry SMTP credentials and count against per-sender limits —
       // one user must not be able to send as (or burn the quota of) another's.
-      throw new Error("senderEmail belongs to another user");
+      // The message tells the user exactly how to proceed: pick a different
+      // From address in Compose (a fresh Ethereal account is provisioned).
+      throw new Error(
+        `senderEmail ${input.senderEmail} belongs to another user — type a different From address in Compose and it will be provisioned for you`
+      );
     }
     if (!sender) {
       const { createEtherealAccount } = await import("../lib/mailer");
